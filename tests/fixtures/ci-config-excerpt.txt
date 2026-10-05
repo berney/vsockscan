@@ -1,0 +1,15 @@
+# Verbatim excerpt of a minimal guest kernel config (Linux 6.1.186),
+# captured from /proc/config.gz.
+# Original line numbers: 166 167 762 1414-1418 2434-2437. Nothing else edited.
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
+# CONFIG_MODULES is not set
+CONFIG_VSOCKETS=y
+# CONFIG_VSOCKETS_DIAG is not set
+# CONFIG_VSOCKETS_LOOPBACK is not set
+CONFIG_VIRTIO_VSOCKETS=y
+CONFIG_VIRTIO_VSOCKETS_COMMON=y
+CONFIG_VHOST_MENU=y
+# CONFIG_VHOST_NET is not set
+# CONFIG_VHOST_VSOCK is not set
+# CONFIG_VHOST_CROSS_ENDIAN_LEGACY is not set

@@ -3,6 +3,9 @@
 //! Exit codes (spec §4): `0` clean run, `1` usage error, `2` runtime error,
 //! `3` selftest assertion failure.
 
+mod caps;
+mod gunzip;
+mod kernconfig;
 mod model;
 mod render;
 mod uapi;

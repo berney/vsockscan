@@ -73,6 +73,14 @@ pub struct Tells {
     pub ioctl_cid: Option<u32>,
     pub ioctl_errno: Option<i32>,
     pub vhost_node_present: bool,
+    /// `Some(true)` when `/proc/misc` lists `vhost-vsock`, i.e. the h2g transport is
+    /// registered *right now*. That — not the device node — is the host-side tell:
+    /// unloading `vhost_vsock` removes the `/proc/misc` entry (and takes the
+    /// `GET_LOCAL_CID` answer from 2 to 1) while the node stayed on disk. Opening that
+    /// stale node re-loads the module via `char-major-10-241` autoload, so the node is
+    /// only opened when the registration already says it is there.
+    /// `None`: `/proc/misc` could not be read.
+    pub vhost_registered: Option<bool>,
     pub vhost_openable: Option<bool>,
     pub vhost_features: Option<u64>,
     pub vhost_errno: Option<i32>,
@@ -143,15 +151,25 @@ impl Tells {
             Err(_) => None,
         };
 
-        // /proc/misc: `<minor> <name>` — proves the *core* registered, nothing more.
-        let misc_vsock_minor = std::fs::read_to_string("/proc/misc").ok().and_then(|t| {
-            t.lines().find_map(|l| {
-                let (minor, name) = l.trim().split_once(char::is_whitespace)?;
-                (name.trim() == "vsock")
-                    .then(|| minor.parse::<u32>().ok())
-                    .flatten()
+        // /proc/misc: `<minor> <name>`. For "vsock" this proves the *core*
+        // registered, nothing more. For "vhost-vsock" it is the authoritative
+        // statement that the h2g transport exists *right now*: a device node on
+        // disk says nothing, because it survives `modprobe -r vhost_vsock`.
+        let misc = std::fs::read_to_string("/proc/misc").ok();
+        let misc_entry_minor = |want: &str| {
+            misc.as_ref().and_then(|t| {
+                t.lines().find_map(|l| {
+                    let (minor, name) = l.trim().split_once(char::is_whitespace)?;
+                    (name.trim() == want)
+                        .then(|| minor.parse::<u32>().ok())
+                        .flatten()
+                })
             })
-        });
+        };
+        let misc_vsock_minor = misc_entry_minor("vsock");
+        let vhost_registered = misc
+            .as_ref()
+            .map(|_| misc_entry_minor("vhost-vsock").is_some());
 
         let dev_present = Path::new("/dev/vsock").exists();
         let mut dev_openable = false;
@@ -181,13 +199,27 @@ impl Tells {
             }
         }
 
-        // /dev/vhost-vsock: the host-side muxer's node. Reading its feature bits
-        // is harmless (`_IOR`, no state change); SET_RUNNING is never touched.
+        // /dev/vhost-vsock. Two things this node will not tell you honestly:
+        //
+        //   1. It survives `modprobe -r vhost_vsock`, so its existence and mode say
+        //      nothing about the transport. `/proc/misc` is the registration, and
+        //      `h2g_active()` reads that.
+        //   2. Opening it while the module is *not* loaded triggers
+        //      `request_module("char-major-10-241")`: the kernel auto-loads
+        //      `vhost_vsock`, the node starts answering ioctls, and `/proc/misc`
+        //      lists the name again. A probe that opens the node therefore manufactures
+        //      the very host it was trying to detect, and lies to whoever reads the
+        //      next measurement. So: probe the node only when the registration says it
+        //      is already there (or when /proc/misc cannot be read, where the node is
+        //      all we have). `VHOST_GET_FEATURES` is `_IOR`, no state change; the
+        //      ioctls that *do* change state (`SET_OWNER`, `SET_RUNNING`) are never
+        //      touched.
         let vhost_node_present = Path::new("/dev/vhost-vsock").exists();
         let mut vhost_openable = None;
         let mut vhost_features = None;
         let mut vhost_errno = None;
-        if vhost_node_present {
+        let vhost_probed = vhost_node_present && vhost_registered != Some(false);
+        if vhost_probed {
             match std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -226,6 +258,7 @@ impl Tells {
             ioctl_cid,
             ioctl_errno,
             vhost_node_present,
+            vhost_registered,
             vhost_openable,
             vhost_features,
             vhost_errno,
@@ -246,6 +279,27 @@ impl Tells {
         } else {
             Verdict::Absent
         }
+    }
+
+    /// Whether the host-side (h2g) transport exists *now*.
+    ///
+    /// The `/proc/misc` registration is the fact; the device node is not:
+    /// `modprobe -r vhost_vsock` removes the entry while the node stays
+    /// behind. The node is not even a passive thing to read: `open()` on it triggers
+    /// `request_module("char-major-10-241")`, so `collect()` leaves it closed unless the
+    /// registration is true or unknown. Registration outranks `EACCES`: a node whose
+    /// mode defeats us is still a host.
+    pub fn h2g_active(&self) -> Option<bool> {
+        match self.vhost_registered {
+            Some(registered) => Some(registered),
+            None if !self.vhost_node_present => Some(false),
+            None => self.vhost_openable,
+        }
+    }
+
+    /// The on-disk node claims a host the kernel does not have.
+    pub fn vhost_node_stale(&self) -> bool {
+        self.vhost_node_present && self.vhost_registered == Some(false)
     }
 
     /// The `/dev/vsock` note, spelled out wherever the report shows that tell so
@@ -702,7 +756,7 @@ pub fn collect(opts: &ProbeOpts) -> Report {
             caps: caps.names(),
             cid: resolve_cid(&tells),
             sysctls: sysctls(),
-            posture: posture(device, tells.vhost_openable == Some(true)),
+            posture: posture(device, tells.h2g_active().unwrap_or(false)),
             device,
             config_source: opts.config.then(|| cfg.describe()),
             module_verdicts: Vec::new(),
@@ -862,15 +916,36 @@ pub fn collect(opts: &ProbeOpts) -> Report {
     // ---- host-side node ----------------------------------------------------
     report.probes.push(ProbeRow {
         name: "vhost-node".to_string(),
-        outcome: match (tells.vhost_node_present, tells.vhost_openable) {
-            (true, Some(true)) => {
-                Outcome::new(OutcomeKind::Open).with_detail("device node openable")
+        outcome: if tells.vhost_node_stale() {
+            // Registration-only row, with no errno we did not measure: the node was
+            // deliberately left closed, because opening it would load the module and
+            // change what this report is describing.
+            let o = Outcome::new(OutcomeKind::RefusedKernel).with_detail(
+                "no `vhost-vsock` misc device is registered: `vhost_vsock` is not loaded and the \
+                 node on disk is stale (left closed: opening it would auto-load the module)",
+            );
+            match tells.vhost_errno {
+                Some(e) => o.with_errno(e),
+                None => o,
             }
-            (true, Some(false)) => errno_out(
-                tells.vhost_errno.unwrap_or(libc::EACCES),
-                "node exists, open failed",
-            ),
-            _ => Outcome::new(OutcomeKind::RefusedKernel).with_detail("/dev/vhost-vsock absent"),
+        } else {
+            match (
+                tells.vhost_node_present,
+                tells.vhost_registered,
+                tells.vhost_openable,
+            ) {
+                (true, Some(true), _) => Outcome::new(OutcomeKind::Open)
+                    .with_detail("h2g transport registered in /proc/misc"),
+                (true, None, Some(true)) => Outcome::new(OutcomeKind::Open)
+                    .with_detail("device node openable (/proc/misc unreadable)"),
+                (true, _, Some(false)) => errno_out(
+                    tells.vhost_errno.unwrap_or(libc::EACCES),
+                    "node exists, open failed",
+                ),
+                _ => {
+                    Outcome::new(OutcomeKind::RefusedKernel).with_detail("/dev/vhost-vsock absent")
+                }
+            }
         },
         value: tells.vhost_features.map(|f| format!("{f:#018x}")),
         flags: FlagSet::None,
@@ -899,7 +974,7 @@ pub fn collect(opts: &ProbeOpts) -> Report {
             &cfg,
             &state,
             &caps,
-            Some(tells.vhost_node_present),
+            Some(tells.vhost_registered.unwrap_or(tells.vhost_node_present)),
         )];
         if opts.vsockmon {
             verdicts.push(kernconfig::vsockmon_verdict(&cfg, &state, &caps));
@@ -958,11 +1033,21 @@ pub fn collect(opts: &ProbeOpts) -> Report {
             "--mmio was requested without CAP_SYS_ADMIN: /dev/mem will refuse the read regardless of iomem=relaxed",
         );
     }
-    if matches!(device, Verdict::Present) && tells.vhost_node_present {
+    if matches!(device, Verdict::Present) && tells.h2g_active() == Some(true) {
         report.finding(
             Severity::Warn,
             "both a virtio-vsock device and /dev/vhost-vsock are present: this kernel is both \
              a guest transport and a host muxer (namespace-per-netns kernels allow that)",
+        );
+    }
+    if tells.vhost_node_stale() {
+        report.finding(
+            Severity::Warn,
+            "/dev/vhost-vsock exists while nothing is registered under that name in /proc/misc: \
+             there is no h2g transport and the node is stale. It was deliberately not opened — \
+             `open()` there triggers `request_module(\"char-major-10-241\")`, which would load \
+             `vhost_vsock` and create the host this report is trying to describe. Posture is \
+             computed from the registration.",
         );
     }
     report.header.diag = if opts.diag {
@@ -1139,6 +1224,7 @@ mod tests {
             ioctl_cid: None,
             ioctl_errno: None,
             vhost_node_present: false,
+            vhost_registered: None,
             vhost_openable: None,
             vhost_features: None,
             vhost_errno: None,
@@ -1178,6 +1264,51 @@ mod tests {
         let note = t.dev_vsock_note();
         assert!(note.contains("not device evidence"), "{note}");
         assert!(note.contains("minor 123"), "{note}");
+    }
+
+    /// `modprobe -r vhost_vsock` removes the `/proc/misc` entry but
+    /// leaves `/dev/vhost-vsock` on disk. Reading the node as "we are a host" is the false
+    /// positive this guards — and it cannot even be sampled as a probe, because opening it
+    /// auto-loads the module back (see `collect()`).
+    #[test]
+    fn a_stale_vhost_node_does_not_make_us_a_host() {
+        use crate::model::Posture::*;
+        let mut t = tells_with(Some(vec![]));
+        t.vhost_node_present = true;
+        t.vhost_openable = Some(true);
+        t.vhost_features = Some(0x3_3d00_0002);
+        t.vhost_registered = Some(false);
+        assert_eq!(t.h2g_active(), Some(false));
+        assert!(t.vhost_node_stale());
+        assert_eq!(
+            posture(Verdict::Absent, t.h2g_active().unwrap_or(false)),
+            Neither
+        );
+    }
+
+    /// A node we cannot open because of its mode is still a registered host:
+    /// `EACCES` must not demote the posture.
+    #[test]
+    fn registration_outranks_an_unopenable_node() {
+        let mut t = tells_with(Some(vec![]));
+        t.vhost_node_present = true;
+        t.vhost_openable = Some(false);
+        t.vhost_errno = Some(libc::EACCES);
+        t.vhost_registered = Some(true);
+        assert_eq!(t.h2g_active(), Some(true));
+        assert!(!t.vhost_node_stale());
+    }
+
+    #[test]
+    fn unknown_registration_falls_back_to_the_node() {
+        let mut t = tells_with(Some(vec![]));
+        t.vhost_registered = None;
+        t.vhost_node_present = true;
+        t.vhost_openable = Some(true);
+        assert_eq!(t.h2g_active(), Some(true));
+        t.vhost_node_present = false;
+        t.vhost_openable = None;
+        assert_eq!(t.h2g_active(), Some(false));
     }
 
     #[test]

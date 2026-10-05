@@ -195,7 +195,9 @@ mod tests {
     #[test]
     fn gating_matrix() {
         // tty, NO_COLOR, TERM, --no-color -> expectation
-        let cases: &[(&str, bool, Option<&str>, Option<&str>, bool, bool)] = &[
+        // (case, tty, NO_COLOR, TERM, --no-color, expect colour)
+        type Gate = (&'static str, bool, Option<&'static str>, Option<&'static str>, bool, bool);
+        let cases: &[Gate] = &[
             ("tty clean", true, None, None, false, true),
             ("pipe clean", false, None, None, false, false),
             ("NO_COLOR present", true, Some(""), None, false, false),

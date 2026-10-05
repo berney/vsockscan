@@ -75,10 +75,11 @@ pub const IOCTL_GET_LOCAL_CID: libc::c_ulong = (7 << 8) | 0xb9;
 pub const NETLINK_SOCK_DIAG: libc::c_int = 4;
 pub const SOCK_DIAG_BY_FAMILY: u16 = 20;
 pub const NLM_F_REQUEST: u16 = 0x0001;
-pub const NLM_F_MULTI: u16 = 0x0002;
 /// `NLM_F_ROOT = 0x100`, `NLM_F_MATCH = 0x200` (`include/uapi/linux/netlink.h`), so
 /// the dump flag pair `ss` sends is `0x300` and the whole flags word is `0x301`
-/// (captured byte-for-byte from `ss -f vsock`).
+/// (captured byte-for-byte from `ss -f vsock`). The *replies* carry
+/// `NLM_F_MULTI` (0x2); that flag is only ever read, so it has no constant here
+/// — `ss` records it where the capture lives.
 pub const NLM_F_ROOT: u16 = 0x0100;
 pub const NLM_F_MATCH: u16 = 0x0200;
 pub const NLM_F_DUMP: u16 = NLM_F_ROOT | NLM_F_MATCH;

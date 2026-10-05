@@ -93,9 +93,9 @@ impl Huff {
         counts[0] = 0;
         // Over-subscribed code (needs more bits than the length allows) is corrupt.
         let mut left: i32 = 1;
-        for len in 1..16 {
+        for (_len, count) in counts.iter().enumerate().skip(1) {
             left <<= 1;
-            left -= counts[len] as i32;
+            left -= *count as i32;
             if left < 0 {
                 return None;
             }

@@ -10,6 +10,8 @@ mod kernconfig;
 mod model;
 mod probe;
 mod render;
+mod scan;
+mod spec;
 mod uapi;
 
 use std::io::Write;
@@ -24,17 +26,27 @@ use render::style;
 pub type RunResult<T> = Result<T, RuntimeError>;
 
 #[derive(Debug)]
-pub struct RuntimeError(pub String);
+pub struct RuntimeError {
+    pub message: String,
+    /// Spec/argument problems exit 1; only a failure to *do* the work exits 2.
+    /// A script that treats "your --cid spec is nonsense" and "no AF_VSOCK here"
+    /// as the same code cannot tell a typo from an absent transport.
+    pub usage: bool,
+}
 
 impl From<std::io::Error> for RuntimeError {
     fn from(e: std::io::Error) -> Self {
-        RuntimeError(e.to_string())
+        RuntimeError { message: e.to_string(), usage: false }
     }
 }
 
 impl RuntimeError {
     pub fn msg(msg: impl Into<String>) -> Self {
-        RuntimeError(msg.into())
+        RuntimeError { message: msg.into(), usage: false }
+    }
+
+    pub fn usage(msg: impl Into<String>) -> Self {
+        RuntimeError { message: msg.into(), usage: true }
     }
 }
 
@@ -149,9 +161,10 @@ pub struct ScanArgs {
     /// After a successful connect, read up to N bytes.
     #[arg(long, default_value_t = 0, value_name = "N")]
     pub banner: usize,
-    /// Hard cap for `all` / wide ranges.
-    #[arg(long, default_value_t = 256)]
-    pub max_cids: usize,
+    /// Hard cap for `all` / wide ranges (default 256). Passing it explicitly is
+    /// itself taken as an acknowledgement of width, per spec §6.5.
+    #[arg(long, value_name = "N")]
+    pub max_cids: Option<usize>,
     /// Acknowledge that `all` is wide and run past the curated default anyway.
     #[arg(long)]
     pub i_know_this_is_wide: bool,
@@ -242,8 +255,9 @@ fn main() -> ExitCode {
     };
     let res: RunResult<()> = match command {
         Command::Probe(a) => run_probe(&cli, a),
-        Command::Scan(_) | Command::Listen(_) | Command::Selftest => Err(RuntimeError::msg(
-            "not implemented yet: scan/listen/selftest land in plan Tasks 6-8",
+        Command::Scan(a) => run_scan(&cli, a),
+        Command::Listen(_) | Command::Selftest => Err(RuntimeError::msg(
+            "not implemented yet: listen/selftest land in plan Tasks 7-8",
         )),
     };
     res.map_or_else(From::from, |_| ExitCode::SUCCESS)
@@ -312,6 +326,138 @@ fn run_probe(cli: &Cli, a: &ProbeArgs) -> RunResult<()> {
     emit(cli, &report)
 }
 
+/// The classification header first, then the sweep: every row is reported next to
+/// the device tells that qualify it (spec §6.1), which is why `scan` runs the
+/// same `probe::collect` that `probe` does instead of a lighter header.
+fn run_scan(cli: &Cli, a: &ScanArgs) -> RunResult<()> {
+    let spec_text = a.cid.as_deref().ok_or_else(|| {
+        RuntimeError::usage(
+            "--cid is required for scan: no implicit default, so a run can never be \
+             pointed at the hypervisor keyspace by forgetting an argument",
+        )
+    })?;
+    let cid_spec =
+        spec::CidSpec::parse(spec_text).map_err(|e| RuntimeError::usage(e + " (--cid SPEC)"))?;
+    let port_spec =
+        spec::PortSpec::parse(&a.ports).map_err(|e| RuntimeError::usage(e + " (--ports SPEC)"))?;
+
+    let mut report = probe::collect(&probe::ProbeOpts {
+        seqpacket: false,
+        to_host: a.flags == crate::FlagsMode::ToHost,
+        vsockmon: false,
+        config: true,
+        mmio: false,
+        diag: !a.no_diag,
+    });
+
+    let mut extra = read_cid_file(a.cid_file.as_deref())?;
+    for e in &report.diag_entries {
+        for cid in [e.src_cid, e.dst_cid] {
+            if cid != uapi::VMADDR_CID_ANY {
+                extra.push(cid);
+            }
+        }
+    }
+    let resolved = cid_spec
+        .resolve(&spec::CidContext {
+            max_cids: a.max_cids.unwrap_or(256),
+            wide_ok: a.i_know_this_is_wide || a.max_cids.is_some(),
+            extra: &extra,
+            local: report.header.cid.cid,
+        })
+        .map_err(RuntimeError::usage)?;
+    report.summary.notes.extend(resolved.notes);
+
+    // `probe::collect` labels the document as its own command; this is a scan
+    // that borrowed the classification, and the label is part of the evidence.
+    report.command = "scan".to_string();
+    // The noise statement has to describe *this* run, not the classification
+    // probes: a sweep is the part that puts packets on the wire, and on a
+    // `g2h_fallback` kernel it puts them toward the host.
+    report.header.noise = sweep_noise(&report, a, &resolved.cids, &port_spec.0);
+
+    let opts = scan::Opts {
+        cids: &resolved.cids,
+        ports: &port_spec.0,
+        flags: match a.flags {
+            crate::FlagsMode::None => scan::FlagMode::None,
+            crate::FlagsMode::ToHost => scan::FlagMode::ToHost,
+            crate::FlagsMode::Both => scan::FlagMode::Both,
+        },
+        parallel: a.parallel,
+        timeout_ms: (a.timeout * 1000.0) as i32,
+        banner: a.banner,
+        stage1_ports: a.stage1_ports,
+        spec_notes: Vec::new(),
+    };
+    scan::run(&opts, &mut report).map_err(RuntimeError::usage)?;
+    emit(cli, &report)
+}
+
+/// What this sweep is about to make happen, stated before it happens (spec §11).
+fn sweep_noise(
+    report: &model::Report,
+    a: &ScanArgs,
+    cids: &[u32],
+    ports: &[u32],
+) -> String {
+    let flag_sets = match a.flags {
+        crate::FlagsMode::Both => 2,
+        _ => 1,
+    };
+    let connects = cids.len() * ports.len() * flag_sets;
+    let value = |key: &str| -> String {
+        report
+            .header
+            .sysctls
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str().to_string())
+            .unwrap_or_else(|| "absent".to_string())
+    };
+    let fallback = value("net.vsock.g2h_fallback");
+    let regime = if fallback == "absent" {
+        "the sysctl is absent, which is the pre-namespace regime where the guest-to-host \
+         fallback is unconditional: any CID this kernel cannot route locally may leave"
+            .to_string()
+    } else {
+        format!(
+            "net.vsock.g2h_fallback={fallback} and ns_mode={} on this kernel: {} CID 2 \
+             traffic toward the host",
+            value("net.vsock.ns_mode"),
+            if fallback == "1" { "a wide sweep genuinely sends" } else { "the fallback is off, so a sweep stays" }
+        )
+    };
+    format!(
+        "sweep of {connects} connect(s): {} CID(s) x {} port(s) x {flag_sets} flag set(s), \
+         {}s timeout each; {regime}",
+        cids.len(),
+        ports.len(),
+        a.timeout
+    )
+}
+
+/// `--cid-file`: one CID per line, `#` comments tolerated. A line that is not a
+/// number is an error rather than a silently skipped entry, because a typo in a
+/// file nobody re-reads would otherwise drop a target from the sweep.
+fn read_cid_file(path: Option<&std::path::Path>) -> RunResult<Vec<u32>> {
+    let Some(path) = path else { return Ok(Vec::new()) };
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| RuntimeError::usage(format!("reading {}: {e}", path.display())))?;
+    let mut out = Vec::new();
+    for (no, line) in text.lines().enumerate() {
+        let l = line.split('#').next().unwrap_or("").trim();
+        if l.is_empty() {
+            continue;
+        }
+        out.push(
+            l.parse::<u32>()
+                .map_err(|e| RuntimeError::usage(format!("{}:{}: {l:?} is not a CID ({e})", path.display(), no + 1)))?,
+        );
+    }
+    Ok(out)
+}
+
 /// `isatty(1)` without a crate.
 fn tty_stdout() -> bool {
     // SAFETY: isatty only reads the fd's status.
@@ -320,8 +466,8 @@ fn tty_stdout() -> bool {
 
 impl From<RuntimeError> for ExitCode {
     fn from(e: RuntimeError) -> Self {
-        eprintln!("vsockscan: {}", e.0);
-        ExitCode::from(2)
+        eprintln!("vsockscan: {}", e.message);
+        ExitCode::from(if e.usage { 1 } else { 2 })
     }
 }
 

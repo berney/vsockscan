@@ -204,7 +204,7 @@ impl ModuleFacts {
                             continue;
                         }
                         if let Some(name) = ko_name(&p) {
-                            if names.iter().any(|w| *w == name) {
+                            if names.contains(&name) {
                                 f.files.insert(name.to_string());
                             }
                         }

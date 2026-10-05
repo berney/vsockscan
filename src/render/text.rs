@@ -72,7 +72,7 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
         writeln!(out, "{}", c.bold("probes"))?;
         for p in &report.probes {
             write!(out, "  {:<22} ", p.name)?;
-            write_outcome(c, &p.outcome, out)?;
+            write_outcome(c, &p.outcome, true, out)?;
             if !matches!(p.flags, crate::model::FlagSet::None) {
                 write!(out, " flag={}", p.flags.label())?;
             }
@@ -88,8 +88,8 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
         writeln!(out, "{}", c.bold("sock diag"))?;
         writeln!(
             out,
-            "  {: <8}{: <8}{: <8}{: <8}{: <12}{: <12}{}",
-            "src", "dst", "state", "shutdown", "ino", "pid", "cookie"
+            "  {: <22}{: <22}{: <6}{: <9}{: <12}{: <18}cookie",
+            "src", "dst", "state", "shutdown", "ino", "pid"
         )?;
         for e in &report.diag_entries {
             let pid = match (&e.pid, &e.pid_comm) {
@@ -99,7 +99,7 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
             };
             writeln!(
                 out,
-                "  {: <8}{: <8}{: <8}{: <8}{: <12}{: <12}{}",
+                "  {: <22}{: <22}{: <6}{: <9}{: <12}{: <18}{}",
                 format!("{}:{}", e.src_cid, e.src_port),
                 format!("{}:{}", e.dst_cid, e.dst_port),
                 e.state,
@@ -116,17 +116,27 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
         writeln!(out, "{}", c.bold("results"))?;
         writeln!(
             out,
-            "{: <8}{: <8}{: <10}{: <20}{: <16}{}",
-            "cid", "port", "flag", "outcome", "errno", "ms"
+            "{: <8}{: <8}{: <10}{: <20}{: <16}ms",
+            "cid", "port", "flag", "outcome", "errno"
         )?;
         for r in &report.rows {
             write!(out, "{: <8}{: <8}{: <10}", r.cid, r.port, r.flags.label())?;
-            write_outcome(c, &r.outcome, out)?;
+            // `ms` stays a fixed column here and the explanation trails it.
+            // Printing the detail before the number, the way the probe table does,
+            // shifted every column after it and made the sweep ungreppable.
+            write_outcome(c, &r.outcome, false, out)?;
             write!(out, "{: >16}", r.elapsed_ms)?;
-            writeln!(out)?;
+            let mut tail = Vec::new();
             if let Some(b) = &r.banner {
-                writeln!(out, "{: <26}banner {b}", "")?;
+                tail.push(format!("banner {b}"));
             }
+            if let Some(d) = &r.outcome.detail {
+                tail.push(d.clone());
+            }
+            if !tail.is_empty() {
+                write!(out, "  {}", tail.join("  "))?;
+            }
+            writeln!(out)?;
         }
     }
 
@@ -170,9 +180,13 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
 
 /// `<kind>` coloured, then the errno it came from — a verdict never appears
 /// without the signal that supports it.
+/// Outcome + errno columns. `inline_detail` is for the probe table, where the
+/// explanation *is* the readout; sweep rows pass `false` and print their detail
+/// after the fixed columns instead.
 fn write_outcome(
     c: ColorSupport,
     o: &Outcome,
+    inline_detail: bool,
     out: &mut dyn Write,
 ) -> io::Result<()> {
     // Pad the *plain* text, then colour it: wrapping first would let the escape
@@ -195,8 +209,10 @@ fn write_outcome(
         },
     };
     write!(out, "{: <16}", errno)?;
-    if let Some(d) = &o.detail {
-        write!(out, "{}", d)?;
+    if inline_detail {
+        if let Some(d) = &o.detail {
+            write!(out, "{}", d)?;
+        }
     }
     Ok(())
 }
@@ -236,6 +252,31 @@ mod tests {
         r.finding(Severity::Alert, "device present: this is not the target shape");
         r.recompute_summary(9);
         r
+    }
+
+    /// The sweep table is machine-grepped as well as read: a long explanation
+    /// must not displace the numeric column that comes before it.
+    #[test]
+    fn sweep_row_columns_survive_a_long_explanation() {
+        let mut r = report();
+        for row in r.rows.iter_mut() {
+            row.elapsed_ms = 2000;
+            row.banner = Some("7f 45 4c 46".to_string());
+        }
+        r.rows[0].outcome.detail =
+            Some("underlying closed; the canary proved CID 2 is loopback".to_string());
+        let t = s(&r, ColorSupport::Off);
+        let line = t
+            .lines()
+            .find(|l| l.starts_with("2  ") && l.contains("underlying closed"))
+            .expect("one row line carrying the explanation");
+        let ms = line.find("2000").expect("the ms column");
+        let banner = line.find("7f 45 4c 46").expect("the banner preview");
+        let detail = line.find("underlying closed").expect("the detail");
+        assert!(
+            ms < banner && banner < detail,
+            "fixed columns must come before free text:\n{line}"
+        );
     }
 
     fn s(r: &Report, c: ColorSupport) -> String {

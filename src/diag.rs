@@ -54,7 +54,7 @@ pub fn build_request(states: u32, seq: u32) -> Vec<u8> {
     ]
     .into_iter()
     .chain(states.to_le_bytes())
-    .chain([0u8; 16])
+    .chain([0u8; 16]) // idiag_ino, src_port, dst_port, extra: all zero for a dump
     .collect();
     let mut msg = Vec::with_capacity(REQUEST_LEN);
     // `nlmsg_len` is `__u32`: encoding `REQUEST_LEN` (a `usize`) directly writes
@@ -62,7 +62,7 @@ pub fn build_request(states: u32, seq: u32) -> Vec<u8> {
     // below is what pins this down.
     msg.extend_from_slice(&(REQUEST_LEN as u32).to_le_bytes());
     msg.extend_from_slice(&uapi::SOCK_DIAG_BY_FAMILY.to_le_bytes());
-    msg.extend_from_slice(&(uapi::NLM_F_ROOT | uapi::NLM_F_MATCH | uapi::NLM_F_REQUEST).to_le_bytes());
+    msg.extend_from_slice(&(uapi::NLM_F_REQUEST | uapi::NLM_F_DUMP).to_le_bytes());
     msg.extend_from_slice(&seq.to_le_bytes());
     msg.extend_from_slice(&0u32.to_le_bytes());
     msg.extend_from_slice(&payload);
@@ -95,11 +95,36 @@ pub fn parse_entry(body: &[u8]) -> Option<DiagEntry> {
     })
 }
 
-/// `TCP_ESTABLISHED` and friends are the `TCP_*` states sock_diag reuses;
-/// `10` is LISTEN, which is what a census is usually after.
-pub const ALL_STATES: u32 = 0xfff;
-pub const ST_LISTEN: u32 = 1 << 10;
+/// sock_diag reuses the kernel's `TCP_*` state numbers for vsock; a census filter
+/// is a bitmask over them (`TCPF_*`).
 pub const ST_ESTABLISHED: u32 = 1 << 1;
+pub const ST_SYN_SENT: u32 = 1 << 2;
+pub const ST_SYN_RECV: u32 = 1 << 3;
+pub const ST_FIN_WAIT1: u32 = 1 << 4;
+pub const ST_FIN_WAIT2: u32 = 1 << 5;
+pub const ST_TIME_WAIT: u32 = 1 << 6;
+pub const ST_CLOSE_WAIT: u32 = 1 << 7;
+pub const ST_LAST_ACK: u32 = 1 << 8;
+pub const ST_CLOSING: u32 = 1 << 9;
+pub const ST_LISTEN: u32 = 1 << 10;
+pub const ST_NEW_SYN_RECV: u32 = 1 << 11;
+
+/// Every state at once (`0xfff`, the kernel's `TCPF_ALL`): filtering to LISTEN
+/// would hide the connected sockets that make a census more than a port list.
+pub const ALL_STATES: u32 = ST_ESTABLISHED
+    | ST_SYN_SENT
+    | ST_SYN_RECV
+    | ST_FIN_WAIT1
+    | ST_FIN_WAIT2
+    | ST_TIME_WAIT
+    | ST_CLOSE_WAIT
+    | ST_LAST_ACK
+    | ST_CLOSING
+    | ST_LISTEN
+    | ST_NEW_SYN_RECV;
+
+/// The `state` byte of an entry, not a filter bit: LISTEN.
+pub const STATE_LISTEN: u8 = 10;
 
 /// Ask the kernel for every vsock socket in these states.
 pub fn census(states: u32) -> Result<Vec<DiagEntry>, DiagError> {
@@ -187,13 +212,13 @@ pub fn parse_messages(data: &[u8]) -> (Vec<DiagEntry>, bool, Option<i32>) {
     let mut done = false;
     let mut error = None;
     let mut off = 0usize;
-    while off + 16 <= data.len() {
+    while off + uapi::NLMSG_HDRLEN <= data.len() {
         let len = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
         let mtype = u16::from_le_bytes(data[off + 4..off + 6].try_into().unwrap());
-        if len < 16 || off + len > data.len() {
+        if len < uapi::NLMSG_HDRLEN || off + len > data.len() {
             break;
         }
-        let body = &data[off + 16..off + len];
+        let body = &data[off + uapi::NLMSG_HDRLEN..off + len];
         match mtype {
             uapi::NLMSG_DONE => done = true,
             uapi::NLMSG_ERROR => {

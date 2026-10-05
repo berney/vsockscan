@@ -114,11 +114,62 @@ fn spawn_listeners(k: usize) -> (Vec<(u32, libc::c_int)>, Vec<u32>) {
     (held, free)
 }
 
+/// Accept on the fixture listeners in the background so the sweep has somewhere
+/// to arrive. Counting the accepts is the point: it tells the checks whether this
+/// machine has a loopback path at all.
+fn spawn_accept_counter(
+    held: &[(u32, libc::c_int)],
+    stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    accepted: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> std::thread::JoinHandle<()> {
+    let fds: Vec<libc::c_int> = held.iter().map(|(_, fd)| *fd).collect();
+    let (stop, accepted) = (std::sync::Arc::clone(stop), std::sync::Arc::clone(accepted));
+    std::thread::spawn(move || {
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            let mut pfds: Vec<libc::pollfd> = fds
+                .iter()
+                .map(|fd| libc::pollfd {
+                    fd: *fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                })
+                .collect();
+            // SAFETY: poll over descriptors owned by the fixture.
+            let pr = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, 50) };
+            if pr <= 0 {
+                continue;
+            }
+            for p in pfds {
+                if p.revents & libc::POLLIN == 0 {
+                    continue;
+                }
+                // SAFETY: accept on a listening descriptor we own; the address is optional.
+                let fd = unsafe { libc::accept(p.fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+                if fd >= 0 {
+                    accepted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // SAFETY: closing the accepted descriptor we just opened.
+                    unsafe { libc::close(fd) };
+                }
+            }
+        }
+    })
+}
+
 /// Run every check. Order is the order of the design's steps.
 pub fn run() -> Vec<Check> {
     let mut checks = Vec::new();
     let (held, free) = spawn_listeners(4);
     let listening: Vec<u32> = held.iter().map(|(p, _)| *p).collect();
+
+    // Did the sweep ever reach one of our own listeners? That is the question the
+    // detection check silently depends on, and it is measurable rather than
+    // guessable: a kernel without `vsock_loopback` (and any guest
+    // where CID 2 leaves the machine) answers a connect to our own port with RST
+    // instead of looping back, and then "listeners and controls look identical" is
+    // an environment fact, not a broken classifier.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let watcher = spawn_accept_counter(&held, &stop, &accepted);
 
     checks.push(check_fixture_bound(&listening, &free));
 
@@ -136,8 +187,14 @@ pub fn run() -> Vec<Check> {
     );
 
     checks.push(check_no_invented_open(&rows, &listening, &free));
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    watcher.join().map_err(|_| ()).and_then(|_| Ok(())).ok();
+    let reaches_own_listener = accepted.load(std::sync::atomic::Ordering::Relaxed);
     checks.push(check_listeners_are_distinguishable(
-        &rows, &listening, &free,
+        &rows,
+        &listening,
+        &free,
+        reaches_own_listener,
     ));
     checks.push(check_listeners_agree_with_each_other(&rows, &listening));
     checks.push(check_every_verdict_carries_its_signal(&rows));
@@ -226,6 +283,7 @@ fn check_listeners_are_distinguishable(
     rows: &[crate::model::ScanRow],
     listening: &[u32],
     free: &[u32],
+    reaches_own_listener: usize,
 ) -> Check {
     if listening.len() < 4 {
         return Check::skip("listeners-distinguishable", "fixture did not bind");
@@ -248,20 +306,29 @@ fn check_listeners_are_distinguishable(
             format!("listeners {l:?} vs released ports {f:?}"),
         );
     }
-    // Same class on both sides: legitimate only when nothing could route at all.
-    if l.len() == 1 && l[0] == OutcomeKind::RefusedKernel.as_str() {
+    // Same class on both sides is legitimate exactly when nothing could arrive at
+    // our own listener: the kernel refused everything (no transport), or the
+    // fixture took zero connections (no loopback transport - `vsock_loopback` is
+    // not built - so CID 2 went out to a muxer that had nothing listening).
+    if reaches_own_listener == 0 {
         return Check::pass(
             "listeners-distinguishable",
             format!(
-                "everything was refused by the kernel ({l:?}): this environment has no local \
-                 path, so detection itself is not testable here — recorded as a negative \
-                 environment fact, not as a passed detection test"
+                "listeners and released ports both reported {l:?} and {} connect(s) reached the \
+                 fixture listeners: this machine has no local path (no loopback transport), so \
+                 detection itself is not testable here — recorded as a negative environment \
+                 fact, not as a passed detection test",
+                reaches_own_listener
             ),
         );
     }
     Check::fail(
         "listeners-distinguishable",
-        format!("listeners and released ports both reported {l:?}"),
+        format!(
+            "listeners and released ports both reported {l:?}, although {reaches_own_listener} \
+             connect(s) did reach a fixture listener - something was listening and the sweep \
+             said otherwise"
+        ),
     )
 }
 

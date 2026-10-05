@@ -7,6 +7,7 @@ mod caps;
 mod gunzip;
 mod kernconfig;
 mod model;
+mod probe;
 mod render;
 mod uapi;
 
@@ -225,7 +226,7 @@ fn main() -> ExitCode {
             Err(e) => runtime(format!("writing schema: {e}")),
         };
     }
-    let Some(command) = cli.command else {
+    let Some(command) = &cli.command else {
         // No subcommand: usage error, so help goes to stderr with code 1 —
         // stdout stays clean for anything a pipeline might capture.
         let mut cmd = <Cli as CommandFactory>::command();
@@ -238,11 +239,82 @@ fn main() -> ExitCode {
         eprintln!("\nvsockscan: a subcommand is required (probe | scan | listen | selftest)");
         return ExitCode::from(1);
     };
-    let _ = command;
-    let res: RunResult<()> = Err(RuntimeError::msg(
-        "no engine yet: this build only parses the CLI (plan Tasks 3-8)",
-    ));
+    let res: RunResult<()> = match command {
+        Command::Probe(a) => run_probe(&cli, a),
+        Command::Scan(_) | Command::Listen(_) | Command::Selftest => Err(RuntimeError::msg(
+            "not implemented yet: scan/listen/selftest land in plan Tasks 6-8",
+        )),
+    };
     res.map_or_else(From::from, |_| ExitCode::SUCCESS)
+}
+
+/// One place decides colour, format and destination, so `-o FILE` is
+/// byte-identical to `--no-color` stdout for every command (spec §5).
+fn emit(cli: &Cli, report: &model::Report) -> RunResult<()> {
+    let color = if cli.output.is_some() {
+        render::ColorSupport::Off
+    } else {
+        render::style::detect(cli.no_color, crate::tty_stdout(), &|k| std::env::var(k).ok())
+    };
+    let mut buf: Vec<u8> = Vec::new();
+    render::render(report, cli.format, color, &mut buf)?;
+    match &cli.output {
+        Some(path) => std::fs::write(path, &buf)
+            .map_err(|e| RuntimeError::msg(format!("writing {}: {e}", path.display()))),
+        None => {
+            let out = std::io::stdout();
+            let mut h = out.lock();
+            h.write_all(&buf)?;
+            h.flush().ok();
+            Ok(())
+        }
+    }
+}
+
+fn run_probe(cli: &Cli, a: &ProbeArgs) -> RunResult<()> {
+    let opts = probe::ProbeOpts {
+        seqpacket: a.seqpacket,
+        to_host: a.to_host,
+        vsockmon: a.vsockmon,
+        config: a.config,
+        mmio: a.mmio,
+        diag: a.diag,
+    };
+    let mut report = probe::collect(&opts);
+    if let Some(name) = &a.vsockmon_up {
+        probe::vsockmon_up(name, &mut report);
+    }
+    if cli.quiet {
+        // Quiet is the one-line answer, not a truncated report: posture, device,
+        // and the count of things worth reading above.
+        let h = &report.header;
+        let line = format!(
+            "{}: posture {} / device {} / cid {} / {} probe(s), {} finding(s)\n",
+            report.command,
+            h.posture.as_str(),
+            h.device.as_str(),
+            h.cid.cid.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string()),
+            report.probes.len(),
+            report.findings.len()
+        );
+        return match &cli.output {
+            Some(p) => std::fs::write(p, line).map_err(Into::into),
+            None => {
+                let out = std::io::stdout();
+                let mut h = out.lock();
+                h.write_all(line.as_bytes())
+                    .map_err(Into::into)
+                    .and_then(|()| h.flush().map_err(Into::into))
+            }
+        };
+    }
+    emit(cli, &report)
+}
+
+/// `isatty(1)` without a crate.
+fn tty_stdout() -> bool {
+    // SAFETY: isatty only reads the fd's status.
+    unsafe { libc::isatty(libc::STDOUT_FILENO) == 1 }
 }
 
 impl From<RuntimeError> for ExitCode {

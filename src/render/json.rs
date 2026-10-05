@@ -26,6 +26,9 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
 
 /// Remove every SGR sequence. Used by the test that pins "colour adds escapes
 /// and nothing else", and available to anyone diffing a coloured transcript.
+/// Test-side and `--no-color` equivalence check: nothing in the JSON renderer
+/// emits SGR, so stripping a highlighted document must return it unchanged.
+#[cfg(test)]
 pub fn strip_sgr(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars().peekable();

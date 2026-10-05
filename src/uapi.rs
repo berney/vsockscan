@@ -61,17 +61,11 @@ pub const VMADDR_FLAG_TO_HOST: u8 = 1 << 0;
 /// version-dependent: `4294967295` on 6.1.186, `1` on 7.2.0.
 pub const IOCTL_GET_LOCAL_CID: libc::c_ulong = (7 << 8) | 0xb9;
 
-/// `SOL_VSOCK` — `include/uapi/linux/vm_sockets.h:207`, identical in 6.1.y and master.
-/// (There is **no** `SOL_VM_SOCKETS`; anything naming it is a typo that will fail
-/// `ENOPROTOOPT` at runtime, so the constant is not even declared here.)
-pub const SOL_VSOCK: libc::c_int = 287;
-pub const SO_VM_SOCKETS_BUFFER_SIZE: libc::c_int = 0;
-pub const SO_VM_SOCKETS_BUFFER_MIN_SIZE: libc::c_int = 1;
-pub const SO_VM_SOCKETS_BUFFER_MAX_SIZE: libc::c_int = 2;
-/// On 64-bit (`__BITS_PER_LONG == 64`) this is `_OLD` (= 6); `_NEW` is 8 and only
-/// applies where `long` is 32-bit. We are x86_64, so 6.
-pub const SO_VM_SOCKETS_CONNECT_TIMEOUT: libc::c_int = 6;
-pub const SO_VM_SOCKETS_NONBLOCK_TXRX: libc::c_int = 7;
+// Socket options (`SOL_VSOCK = 287`, `include/uapi/linux/vm_sockets.h:207`) are
+// deliberately not declared: this tool never sets a buffer size or a connect
+// timeout through them. Timeouts are `poll()` deadlines, so the report and the
+// syscall agree about what bounded the wait. Note there is **no**
+// `SOL_VM_SOCKETS` — code that names it gets `ENOPROTOOPT` at runtime.
 
 // --- netlink / sock_diag -------------------------------------------------------
 //
@@ -82,7 +76,6 @@ pub const NETLINK_SOCK_DIAG: libc::c_int = 4;
 pub const SOCK_DIAG_BY_FAMILY: u16 = 20;
 pub const NLM_F_REQUEST: u16 = 0x0001;
 pub const NLM_F_MULTI: u16 = 0x0002;
-pub const NLM_F_ACK: u16 = 0x0004;
 /// `NLM_F_ROOT = 0x100`, `NLM_F_MATCH = 0x200` (`include/uapi/linux/netlink.h`), so
 /// the dump flag pair `ss` sends is `0x300` and the whole flags word is `0x301`
 /// (captured byte-for-byte from `ss -f vsock`).
@@ -96,7 +89,12 @@ pub const NLMSG_DONE: u16 = 3;
 pub const NLMSG_HDRLEN: usize = 16;
 
 // --- vhost (`include/uapi/linux/vhost.h`) --------------------------------------
-pub const VHOST_VIRTIO: u8 = 0xAF;
+// `VHOST_VIRTIO = 0xAF` is the ioctl type; the write-side requests
+// (`VHOST_VSOCK_SET_GUEST_CID = _IOW(0xAF, 0x60, u64)`,
+// `VHOST_VSOCK_SET_RUNNING = _IOW(0xAF, 0x61, int)`) exist but are *never*
+// declared as constants here, because calling them would claim a guest CID or
+// start a muxer — interception, which spec §2 rules out. Only the read-only
+// `_IOR` below is used.
 const fn ior(size: u32, ty: u8, nr: u8) -> libc::c_ulong {
     // _IOC(_IOC_READ=2, type, nr, size): dir<<30 | size<<16 | type<<8 | nr.
     ((2 as libc::c_ulong) << 30)
@@ -104,20 +102,9 @@ const fn ior(size: u32, ty: u8, nr: u8) -> libc::c_ulong {
         | ((ty as libc::c_ulong) << 8)
         | (nr as libc::c_ulong)
 }
-const fn iow(size: u32, ty: u8, nr: u8) -> libc::c_ulong {
-    ((1 as libc::c_ulong) << 30)
-        | ((size as libc::c_ulong) << 16)
-        | ((ty as libc::c_ulong) << 8)
-        | (nr as libc::c_ulong)
-}
 /// `_IOR(VHOST_VIRTIO, 0x00, __u64)` = 0x8008afaf — read-only, so it is safe to
 /// issue against a node we do not own.
 pub const VHOST_GET_FEATURES: libc::c_ulong = ior(8, 0xAF, 0x00);
-/// `_IOW(VHOST_VIRTIO, 0x60, __u64)`. Declared for completeness: this tool never
-/// claims a CID (that would be interception, a non-goal).
-pub const VHOST_VSOCK_SET_GUEST_CID: libc::c_ulong = iow(8, 0xAF, 0x60);
-/// `_IOW(VHOST_VIRTIO, 0x61, int)`. Same caveat.
-pub const VHOST_VSOCK_SET_RUNNING: libc::c_ulong = iow(4, 0xAF, 0x61);
 /// Errno name for the codes this tool can observe. Unknown codes render numerically
 /// at the call site so nothing is silently mislabelled.
 pub fn errno_name(err: i32) -> Option<&'static str> {

@@ -74,12 +74,14 @@ impl ConfigRead {
     pub fn load(release: &str) -> ConfigRead {
         let mut errors = Vec::new();
         match std::fs::read("/proc/config.gz") {
-            Ok(raw) => {
-                if let Some(text) = crate::gunzip::gunzip(&raw).and_then(|b| String::from_utf8(b).ok()) {
-                    return ConfigRead::from_text("/proc/config.gz", &text);
+            Ok(raw) if crate::gunzip::is_gzip(&raw) => {
+                match crate::gunzip::gunzip(&raw).and_then(|b| String::from_utf8(b).ok()) {
+                    Some(text) => return ConfigRead::from_text("/proc/config.gz", &text),
+                    None => errors
+                        .push("/proc/config.gz exists but does not inflate to UTF-8".to_string()),
                 }
-                errors.push("/proc/config.gz exists but is not decodable gzip".to_string());
             }
+            Ok(_) => errors.push("/proc/config.gz exists but is not a gzip stream".to_string()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => errors.push(format!("/proc/config.gz: {e}")),
         }

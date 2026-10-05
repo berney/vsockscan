@@ -470,6 +470,7 @@ impl Report {
 
 /// Header for the tests and for commands that have nothing better yet, so no
 /// module invents its own placeholder.
+#[cfg(test)]
 pub fn placeholder_header() -> Header {
     Header {
         kernel: "unknown".to_owned(),

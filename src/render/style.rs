@@ -31,8 +31,13 @@
 use crate::model::{OutcomeKind, Severity, TellState, Verdict};
 
 // --- Titanium palette (titanium.json, dark variant) -------------------------
+// Copied whole from `~/co/berney/amirustrained/src/render/style.rs` so the two
+// tools' output is comparable token for token. A few entries are unused here;
+// dropping them would break that provenance, which is worth more than a lint.
+#[allow(dead_code, reason = "vendored palette, kept whole for provenance")]
 pub const ELECTRIC_BLUE: &str = "#00b4ff";
 pub const TITANIUM_GOLD: &str = "#d4c090";
+#[allow(dead_code, reason = "vendored palette, kept whole for provenance")]
 pub const BRIGHT_ALUMINUM: &str = "#e8ecf4";
 pub const DIM_ALUMINUM: &str = "#9ca3b0";
 pub const WARNING_AMBER: &str = "#ffb347";

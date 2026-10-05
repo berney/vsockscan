@@ -154,8 +154,13 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
         }
     }
 
-    writeln!(out)?;
-    let mut parts: Vec<String> = report
+    summary(report, c, out)
+}
+
+/// The summary block on its own: this is what `-q` prints, for a transcript that
+/// should say how a run went without repeating it.
+pub fn summary(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Result<()> {
+    writeln!(out)?;    let mut parts: Vec<String> = report
         .summary
         .by_outcome
         .iter()
@@ -169,7 +174,14 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
         parts.join(" ")
     )?;
     if let Some(agree) = report.summary.flags_agree {
-        write!(out, " flags-agree={}", if agree { "yes" } else { "NO" })?;
+        // The one place the summary can say "these two runs of the same port
+        // disagreed", so it is the one place the palette earns its keep here.
+        let word = if agree { "yes" } else { "NO" };
+        let word = c.fg(
+            if agree { style::READOUT_GREEN } else { style::WARNING_AMBER },
+            word,
+        );
+        write!(out, " flags-agree={word}")?;
     }
     writeln!(out, " elapsed={}ms", report.summary.elapsed_ms)?;
     for n in &report.summary.notes {
@@ -307,6 +319,18 @@ mod tests {
         assert!(block[0].starts_with("  note   "), "{}", block[0]);
         assert!(block[1].starts_with("         00000000"), "{}", block[1]);
         assert!(block[2].starts_with("         00000005"), "{}", block[2]);
+    }
+
+    /// `-q` is the "just tell me how it went" mode: the summary, and nothing that
+    /// the full report already said.
+    #[test]
+    fn quiet_mode_is_the_summary_alone() {
+        let mut buf = Vec::new();
+        super::summary(&report(), ColorSupport::Off, &mut buf).unwrap();
+        let t = String::from_utf8(buf).unwrap();
+        assert!(t.contains("summary  results=2"), "{t}");
+        assert!(!t.contains("findings"), "{t}");
+        assert!(!t.contains("cid     port"), "{t}");
     }
 
     #[test]

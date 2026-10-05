@@ -468,10 +468,23 @@ impl Report {
     }
 }
 
+/// A header that claims nothing: for reports with no environment to describe (the
+/// selftest's round-trip sample) and for tests. A real command must never emit
+/// this, because every field reads as unknown.
+impl Header {
+    pub fn placeholder() -> Header {
+        placeholder_inner()
+    }
+}
+
 /// Header for the tests and for commands that have nothing better yet, so no
 /// module invents its own placeholder.
 #[cfg(test)]
 pub fn placeholder_header() -> Header {
+    placeholder_inner()
+}
+
+fn placeholder_inner() -> Header {
     Header {
         kernel: "unknown".to_owned(),
         uid: unsafe { libc::getuid() },

@@ -12,6 +12,7 @@ mod model;
 mod probe;
 mod render;
 mod scan;
+mod selftest;
 mod spec;
 mod uapi;
 
@@ -33,21 +34,24 @@ pub struct RuntimeError {
     /// A script that treats "your --cid spec is nonsense" and "no AF_VSOCK here"
     /// as the same code cannot tell a typo from an absent transport.
     pub usage: bool,
+    /// A failed selftest assertion is its own code: it means the tool disagrees
+    /// with itself, which is neither a bad argument nor an unusable environment.
+    pub assert_failure: bool,
 }
 
 impl From<std::io::Error> for RuntimeError {
     fn from(e: std::io::Error) -> Self {
-        RuntimeError { message: e.to_string(), usage: false }
+        RuntimeError { message: e.to_string(), usage: false, assert_failure: false }
     }
 }
 
 impl RuntimeError {
     pub fn msg(msg: impl Into<String>) -> Self {
-        RuntimeError { message: msg.into(), usage: false }
+        RuntimeError { message: msg.into(), usage: false, assert_failure: false }
     }
 
     pub fn usage(msg: impl Into<String>) -> Self {
-        RuntimeError { message: msg.into(), usage: true }
+        RuntimeError { message: msg.into(), usage: true, assert_failure: false }
     }
 }
 
@@ -264,9 +268,7 @@ fn main() -> ExitCode {
         Command::Probe(a) => run_probe(&cli, a),
         Command::Scan(a) => run_scan(&cli, a),
         Command::Listen(a) => run_listen(&cli, a),
-        Command::Selftest => Err(RuntimeError::msg(
-            "not implemented yet: selftest lands in plan Task 8",
-        )),
+        Command::Selftest => run_selftest(&cli),
     };
     res.map_or_else(From::from, |_| ExitCode::SUCCESS)
 }
@@ -280,7 +282,11 @@ fn emit(cli: &Cli, report: &model::Report) -> RunResult<()> {
         render::style::detect(cli.no_color, crate::tty_stdout(), &|k| std::env::var(k).ok())
     };
     let mut buf: Vec<u8> = Vec::new();
-    render::render(report, cli.format, color, &mut buf)?;
+    if cli.quiet {
+        render::render_summary(report, cli.format, color, &mut buf)?;
+    } else {
+        render::render(report, cli.format, color, &mut buf)?;
+    }
     match &cli.output {
         Some(path) => std::fs::write(path, &buf)
             .map_err(|e| RuntimeError::msg(format!("writing {}: {e}", path.display()))),
@@ -402,6 +408,45 @@ fn run_scan(cli: &Cli, a: &ScanArgs) -> RunResult<()> {
     emit(cli, &report)
 }
 
+/// `selftest` proves the engine against itself, so its exit code is the answer:
+/// `3` when a check fails, `2` when AF_VSOCK is not usable at all (nothing to
+/// test), `0` when every check passed or was skipped for a stated reason.
+fn run_selftest(cli: &Cli) -> RunResult<()> {
+    if !selftest::environment_usable() {
+        return Err(RuntimeError::msg(
+            "AF_VSOCK is not available here, so there is nothing for selftest to check",
+        ));
+    }
+    let checks = selftest::run();
+    let mut report = probe::collect(&probe::ProbeOpts {
+        seqpacket: false,
+        to_host: false,
+        vsockmon: false,
+        config: false,
+        mmio: false,
+        diag: false,
+    });
+    let (pass, fail, skip) = selftest::counts(&checks);
+    report.header.noise = format!(
+        "selftest: loopback traffic inside this machine only ({} connects), never toward a \
+         host service",
+        2 * 8 * 2
+    );
+    report = selftest::into_report(&checks, report.header);
+    emit(cli, &report)?;
+    if cli.quiet {
+        eprintln!("selftest: {pass} passed, {fail} failed, {skip} skipped");
+    }
+    if fail > 0 {
+        return Err(RuntimeError {
+            message: format!("{fail} selftest check(s) failed"),
+            usage: false,
+            assert_failure: true,
+        });
+    }
+    Ok(())
+}
+
 fn run_listen(cli: &Cli, a: &ListenArgs) -> RunResult<()> {
     let ports = spec::PortSpec::parse(&a.ports)
         .map_err(|e| RuntimeError::usage(e + " (--ports SPEC)"))?;
@@ -515,7 +560,7 @@ fn tty_stdout() -> bool {
 impl From<RuntimeError> for ExitCode {
     fn from(e: RuntimeError) -> Self {
         eprintln!("vsockscan: {}", e.message);
-        ExitCode::from(if e.usage { 1 } else { 2 })
+        ExitCode::from(if e.assert_failure { 3 } else if e.usage { 1 } else { 2 })
     }
 }
 

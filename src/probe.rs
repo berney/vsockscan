@@ -582,6 +582,12 @@ pub fn nonblocking_connect(fd: libc::c_int, addr: &uapi::SockaddrVm, timeout_ms:
     }
 }
 
+/// The port a bound socket actually holds. `getsockname` is the only way to learn
+/// what `bind(CID_ANY, PORT_ANY)` was handed, and the selftest fixture needs it.
+pub fn sockname_port(fd: libc::c_int) -> Option<u32> {
+    sockname(fd).ok().map(|a| a.svm_port)
+}
+
 /// Accept with a short deadline and report the peer's `(cid, port)`.
 fn try_accept(listener: libc::c_int) -> Option<(u32, u32)> {
     let mut p = libc::pollfd { fd: listener, events: libc::POLLIN, revents: 0 };

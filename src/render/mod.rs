@@ -33,6 +33,21 @@ pub fn render(
     }
 }
 
+/// `-q`: the summary block only, for the human formats. JSON and YAML deliberately
+/// ignore quiet — a document with fields missing is not the same machine contract,
+/// and a caller that asked for JSON should get JSON.
+pub fn render_summary(
+    report: &Report,
+    format: Format,
+    color: ColorSupport,
+    out: &mut dyn Write,
+) -> io::Result<()> {
+    match format {
+        Format::Text => text::summary(report, color, out),
+        other => render(report, other, color, out),
+    }
+}
+
 /// JSON Schema for the `--json` document. Hand-written and drift-tested in
 /// [`tests::schema_matches_serialized_report`]: a schema nobody checks against
 /// the emitter is documentation that rots silently.

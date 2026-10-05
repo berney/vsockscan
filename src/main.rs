@@ -3,11 +3,16 @@
 //! Exit codes (spec §4): `0` clean run, `1` usage error, `2` runtime error,
 //! `3` selftest assertion failure.
 
+mod model;
+mod render;
 mod uapi;
 
+use std::io::Write;
 use std::process::ExitCode;
 
-use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
+
+use render::style;
 
 /// Outcome of anything this binary can be asked to do, mapped onto the exit codes
 /// documented above.
@@ -28,13 +33,9 @@ impl RuntimeError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Format {
-    Text,
-    Markdown,
-    Json,
-    Yaml,
-}
+// `--format` values are the renderer's own `model::Format`: one enum, no
+// parallel definition to keep in step.
+use model::Format;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum FlagsMode {
@@ -54,12 +55,14 @@ pub enum FlagsMode {
     about = "AF_VSOCK recon: device presence, CID resolution, two-direction reachability, listener census",
     // clap's own usage exit code is 2, which this tool reserves for runtime
     // errors; parse() maps usage problems to 1 and help/version to 0 (spec §4).
-    arg_required_else_help = true
+    // `arg_required_else_help` is deliberately NOT used: it fires before we can
+    // see `--json-schema`, which is a standalone escape hatch (spec §12) and
+    // must work with no subcommand. The missing-subcommand case is handled in
+    // `main`, where it is reported as a usage error on stderr.
 )]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Command,
-
+    pub command: Option<Command>,
     /// Output format.
     #[arg(long, value_enum, default_value_t = Format::Text, global = true)]
     pub format: Format,
@@ -180,9 +183,11 @@ fn plaintext_styles() -> bool {
 /// Usage problems are 1; `--help`/`--version` are 0; code 2 stays for runtime errors.
 fn parse() -> Result<Cli, u8> {
     let mut cmd = <Cli as clap::CommandFactory>::command();
-    if plaintext_styles() {
-        cmd = cmd.styles(clap::builder::Styles::plain());
-    }
+    cmd = if plaintext_styles() {
+        cmd.styles(clap::builder::Styles::plain())
+    } else {
+        cmd.styles(style::clap_styles())
+    };
     let matches = cmd.try_get_matches_from(std::env::args_os()).map_err(|e| {
         let _ = e.print();
         if e.use_stderr() {
@@ -207,10 +212,32 @@ fn main() -> ExitCode {
         Err(code) => return ExitCode::from(code),
     };
     if cli.json_schema {
-        return runtime("the JSON document schema arrives with the report model (plan Task 2)");
+        // The schema is the machine-readable half of the contract between this
+        // tool and whoever parses its output; it is tested against the emitted
+        // document in `render::tests`, so printing it can only fail on I/O.
+        let out = std::io::stdout();
+        let mut w = out.lock();
+        return match w.write_all(render::json_schema().as_bytes()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => runtime(format!("writing schema: {e}")),
+        };
     }
+    let Some(command) = cli.command else {
+        // No subcommand: usage error, so help goes to stderr with code 1 —
+        // stdout stays clean for anything a pipeline might capture.
+        let mut cmd = <Cli as CommandFactory>::command();
+        cmd = if plaintext_styles() {
+            cmd.styles(clap::builder::Styles::plain())
+        } else {
+            cmd.styles(style::clap_styles())
+        };
+        let _ = cmd.write_help(&mut std::io::stderr());
+        eprintln!("\nvsockscan: a subcommand is required (probe | scan | listen | selftest)");
+        return ExitCode::from(1);
+    };
+    let _ = command;
     let res: RunResult<()> = Err(RuntimeError::msg(
-        "no engine yet: this build only parses the CLI (plan Tasks 2-8)",
+        "no engine yet: this build only parses the CLI (plan Tasks 3-8)",
     ));
     res.map_or_else(From::from, |_| ExitCode::SUCCESS)
 }

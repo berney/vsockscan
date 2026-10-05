@@ -188,7 +188,18 @@ pub fn run() -> Vec<Check> {
 
     checks.push(check_no_invented_open(&rows, &listening, &free));
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    watcher.join().map_err(|_| ()).and_then(|_| Ok(())).ok();
+
+    // A panicked accept watcher would silently weaken the two checks below (their rows
+    // were captured while our own listeners may already have been gone), so the join
+    // result becomes a check rather than a `let _ =`.
+    checks.push(if watcher.join().is_ok() {
+        Check::pass("selftest-watcher", "accept thread finished cleanly")
+    } else {
+        Check::fail(
+            "selftest-watcher",
+            "the accept thread panicked: checks 6-7 measured against possibly-dead listeners",
+        )
+    });
     let reaches_own_listener = accepted.load(std::sync::atomic::Ordering::Relaxed);
     checks.push(check_listeners_are_distinguishable(
         &rows,

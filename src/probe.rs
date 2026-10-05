@@ -302,6 +302,63 @@ impl Tells {
         self.vhost_node_present && self.vhost_registered == Some(false)
     }
 
+    /// Which signal backs [`h2g_active`]'s `Some(true)`, so no downstream verdict can
+    /// claim a device node we never saw or never managed to open.
+    pub fn h2g_evidence(&self) -> Option<&'static str> {
+        match self.vhost_registered {
+            Some(true) => Some("registered in /proc/misc"),
+            Some(false) => None,
+            // No registration to read: only a node we actually opened proves anything.
+            None if self.vhost_openable == Some(true) => Some("device node present in /dev"),
+            None => None,
+        }
+    }
+
+    /// The `vhost-node` row. Kept separate from `collect()` so the combinations that a
+    /// live kernel cannot be made to produce on demand are still under test: in
+    /// particular a *registered* transport whose node refuses us is a refused open, not
+    /// a success — posture stays `host` because the registration is the verdict, but the
+    /// row must show the errno the kernel actually gave.
+    pub fn vhost_node_outcome(&self) -> Outcome {
+        if self.vhost_node_stale() {
+            // No errno unless the kernel gave one: a fabricated `EFAULT` here would be
+            // its own lie. The node is left closed on purpose (opening it would
+            // auto-load `vhost_vsock`).
+            let o = Outcome::new(OutcomeKind::RefusedKernel).with_detail(
+                "no `vhost-vsock` misc device is registered: `vhost_vsock` is not loaded and the \
+                 node on disk is stale (left closed: opening it would auto-load the module)",
+            );
+            return match self.vhost_errno {
+                Some(e) => o.with_errno(e),
+                None => o,
+            };
+        }
+        match (
+            self.vhost_node_present,
+            self.vhost_openable,
+            self.vhost_registered,
+        ) {
+            // A measured refusal outranks the registration: report what the kernel said.
+            // Deliberately not `errno_out`/`classify()`: that taxonomy sorts connect()
+            // answers, and a permission denial on a device node is not an unclassifiable
+            // tool error — the kernel refused *us*, which is what `RefusedKernel` says.
+            (_, Some(false), Some(true)) => Outcome::new(OutcomeKind::RefusedKernel)
+                .with_errno(self.vhost_errno.unwrap_or(libc::EACCES))
+                .with_detail("the h2g transport is registered; the node refused this uid"),
+            (_, Some(false), _) => Outcome::new(OutcomeKind::RefusedKernel)
+                .with_errno(self.vhost_errno.unwrap_or(libc::EACCES))
+                .with_detail("node exists, open failed"),
+            (true, Some(true), Some(true)) => Outcome::new(OutcomeKind::Open)
+                .with_detail("h2g transport registered in /proc/misc; node openable"),
+            (false, _, Some(true)) => Outcome::new(OutcomeKind::Open).with_detail(
+                "h2g transport registered in /proc/misc; no device node on this kernel",
+            ),
+            (true, Some(true), None) => Outcome::new(OutcomeKind::Open)
+                .with_detail("device node openable (/proc/misc unreadable)"),
+            _ => Outcome::new(OutcomeKind::RefusedKernel).with_detail("/dev/vhost-vsock absent"),
+        }
+    }
+
     /// The `/dev/vsock` note, spelled out wherever the report shows that tell so
     /// nobody reads it as device presence again.
     pub fn dev_vsock_note(&self) -> String {
@@ -916,37 +973,7 @@ pub fn collect(opts: &ProbeOpts) -> Report {
     // ---- host-side node ----------------------------------------------------
     report.probes.push(ProbeRow {
         name: "vhost-node".to_string(),
-        outcome: if tells.vhost_node_stale() {
-            // Registration-only row, with no errno we did not measure: the node was
-            // deliberately left closed, because opening it would load the module and
-            // change what this report is describing.
-            let o = Outcome::new(OutcomeKind::RefusedKernel).with_detail(
-                "no `vhost-vsock` misc device is registered: `vhost_vsock` is not loaded and the \
-                 node on disk is stale (left closed: opening it would auto-load the module)",
-            );
-            match tells.vhost_errno {
-                Some(e) => o.with_errno(e),
-                None => o,
-            }
-        } else {
-            match (
-                tells.vhost_node_present,
-                tells.vhost_registered,
-                tells.vhost_openable,
-            ) {
-                (true, Some(true), _) => Outcome::new(OutcomeKind::Open)
-                    .with_detail("h2g transport registered in /proc/misc"),
-                (true, None, Some(true)) => Outcome::new(OutcomeKind::Open)
-                    .with_detail("device node openable (/proc/misc unreadable)"),
-                (true, _, Some(false)) => errno_out(
-                    tells.vhost_errno.unwrap_or(libc::EACCES),
-                    "node exists, open failed",
-                ),
-                _ => {
-                    Outcome::new(OutcomeKind::RefusedKernel).with_detail("/dev/vhost-vsock absent")
-                }
-            }
-        },
+        outcome: tells.vhost_node_outcome(),
         value: tells.vhost_features.map(|f| format!("{f:#018x}")),
         flags: FlagSet::None,
     });
@@ -974,7 +1001,9 @@ pub fn collect(opts: &ProbeOpts) -> Report {
             &cfg,
             &state,
             &caps,
-            Some(tells.vhost_registered.unwrap_or(tells.vhost_node_present)),
+            // Which signal is live, so the module verdict can never name a device node
+            // it did not see (`None` when nothing proves it).
+            tells.h2g_evidence(),
         )];
         if opts.vsockmon {
             verdicts.push(kernconfig::vsockmon_verdict(&cfg, &state, &caps));
@@ -1286,17 +1315,34 @@ mod tests {
         );
     }
 
-    /// A node we cannot open because of its mode is still a registered host:
-    /// `EACCES` must not demote the posture.
+    /// A node we cannot open because of its mode is still a registered host: `EACCES`
+    /// must not demote the posture — but the row is about the node, and there the
+    /// kernel's refusal is the whole answer. Reporting `open` there would claim a success
+    /// the kernel denied and throw the measured errno away.
     #[test]
-    fn registration_outranks_an_unopenable_node() {
+    fn registration_outranks_an_unopenable_node_but_the_row_shows_the_refusal() {
         let mut t = tells_with(Some(vec![]));
         t.vhost_node_present = true;
         t.vhost_openable = Some(false);
         t.vhost_errno = Some(libc::EACCES);
         t.vhost_registered = Some(true);
-        assert_eq!(t.h2g_active(), Some(true));
-        assert!(!t.vhost_node_stale());
+        assert_eq!(t.h2g_active(), Some(true), "we are still a host");
+        assert_eq!(
+            t.h2g_evidence(),
+            Some("registered in /proc/misc"),
+            "the verdict must name the registration, not a node we never opened"
+        );
+        let row = t.vhost_node_outcome();
+        assert_eq!(row.kind, OutcomeKind::RefusedKernel, "{row:?}");
+        assert_eq!(row.errno, Some(libc::EACCES), "{row:?}");
+        let detail = row.detail.unwrap_or_default();
+        assert!(detail.contains("registered"), "{detail}");
+        // The mirror case: registered *and* openable is the honest `open`.
+        t.vhost_openable = Some(true);
+        t.vhost_errno = None;
+        let row = t.vhost_node_outcome();
+        assert_eq!(row.kind, OutcomeKind::Open, "{row:?}");
+        assert_eq!(row.errno, None, "{row:?}");
     }
 
     #[test]

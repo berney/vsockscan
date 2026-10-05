@@ -97,7 +97,7 @@ const SCHEMA: &str = r##"{
             "required": ["name", "state", "reason"],
             "properties": {
               "name": {"type": "string"},
-              "state": {"type": "string", "enum": ["builtin", "loadable", "modules-disabled", "unavailable", "unknown"]},
+              "state": {"type": "string", "enum": ["builtin", "loaded", "loadable", "modules-disabled", "unavailable", "unknown"]},
               "reason": {"type": "string"}
             }
           }

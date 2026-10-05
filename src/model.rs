@@ -244,6 +244,11 @@ impl SysctlValue {
 #[serde(rename_all = "kebab-case")]
 pub enum ModuleAvailability {
     Builtin,
+    /// Not compiled in — but serving its transport *right now*: listed in
+    /// `/proc/modules`, or its device node is present. Once a `=m` module is in
+    /// memory an outside observer cannot separate it from a built-in, so this state
+    /// refuses to claim `Builtin`.
+    Loaded,
     Loadable,
     ModulesDisabled,
     Unavailable,
@@ -254,6 +259,7 @@ impl ModuleAvailability {
     pub fn as_str(self) -> &'static str {
         match self {
             ModuleAvailability::Builtin => "builtin",
+            ModuleAvailability::Loaded => "loaded",
             ModuleAvailability::Loadable => "loadable",
             ModuleAvailability::ModulesDisabled => "modules-disabled",
             ModuleAvailability::Unavailable => "unavailable",

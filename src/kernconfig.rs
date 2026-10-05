@@ -314,9 +314,11 @@ pub struct VerdictQuery<'a> {
     pub name: &'a str,
     /// When given, a missing `CAP_SYS_MODULE` is reported as the blocker.
     pub caps: Option<&'a Caps>,
-    /// `/dev/<node>` observation from `probe`: `Some(true)` seen, `Some(false)`
-    /// definitely not there, `None` not looked.
-    pub node_present: Option<bool>,
+    /// `Some(text)` when something proves the transport is live *right now*, with the
+    /// `text` naming which signal fired (e.g. "registered in /proc/misc" or "device node
+    /// present in /dev") so the verdict can only repeat what was measured. `None`: not
+    /// live, or not looked.
+    pub live_evidence: Option<&'static str>,
     /// Unavailable because a Kconfig dependency is off; precomputed by the
     /// caller that knows the dependency (`vsockmon` -> `VHOST_VSOCK`).
     pub dep_note: Option<String>,
@@ -335,18 +337,33 @@ fn verdict(cfg: &ConfigRead, st: &ModuleState, q: VerdictQuery<'_>) -> ModuleVer
     };
     let sym = cfg.symbol(name);
 
-    // Observed reality outranks the config file's opinion.
-    if q.node_present == Some(true) {
-        return v(
-            ModuleAvailability::Builtin,
-            "device node present in /dev".to_string(),
-        );
-    }
-    if st.facts.loaded.contains(name) {
-        return v(
-            ModuleAvailability::Builtin,
-            "listed in /proc/modules (or /sys/module)".to_string(),
-        );
+    // Observed reality outranks the config file's opinion — but it only proves
+    // "live", never "built into the kernel image". A `=m` module that has been
+    // loaded serves its transport exactly as a built-in does, and from outside the
+    // kernel the two are indistinguishable; claiming `builtin` for it states more
+    // than the signals support. Only `CONFIG_X=y` plus a live transport says builtin.
+    let live = q.live_evidence;
+    let in_modules = st.facts.loaded.contains(name);
+    if live.is_some() || in_modules {
+        let state = if sym == Sym::Yes {
+            ModuleAvailability::Builtin
+        } else {
+            ModuleAvailability::Loaded
+        };
+        let mut basis: Vec<&str> = Vec::new();
+        if let Some(ev) = live {
+            basis.push(ev);
+        }
+        if in_modules {
+            basis.push("listed in /proc/modules");
+        }
+        let mut reason = format!("{name} is live: {}", basis.join(", and "));
+        if state == ModuleAvailability::Loaded && !st.facts.proc_modules_readable {
+            reason.push_str(
+                "; /proc/modules is unreadable, so built-in and loaded cannot be separated",
+            );
+        }
+        return v(state, reason);
     }
     if sym == Sym::Yes || st.facts.builtin.contains(name) {
         return v(
@@ -433,19 +450,20 @@ pub fn vsockmon_verdict(cfg: &ConfigRead, st: &ModuleState, caps: &Caps) -> Modu
         VerdictQuery {
             name: "vsockmon",
             caps: Some(caps),
-            node_present: None,
+            live_evidence: None,
             dep_note,
         },
     )
 }
 
-/// `vhost_verdict` takes the `/dev/vhost-vsock` observation from `probe` (only it
-/// opens the node), so `builtin` can mean "measured openable".
+/// `vhost_verdict` takes the live-transport observation from `probe` — which signal
+/// proved it, usually the `/proc/misc` registration — so `loaded` is a measurement with
+/// a named basis rather than an inference from the config file or a claimed device node.
 pub fn vhost_verdict(
     cfg: &ConfigRead,
     st: &ModuleState,
     caps: &Caps,
-    node_present: Option<bool>,
+    live_evidence: Option<&'static str>,
 ) -> ModuleVerdict {
     verdict(
         cfg,
@@ -453,7 +471,7 @@ pub fn vhost_verdict(
         VerdictQuery {
             name: "vhost_vsock",
             caps: Some(caps),
-            node_present,
+            live_evidence,
             dep_note: None,
         },
     )
@@ -600,22 +618,39 @@ mod tests {
         assert_eq!(v.state, ModuleAvailability::Unavailable);
         assert!(v.reason.contains("CAP_SYS_MODULE"), "{}", v.reason);
 
-        // vhost_vsock is already in memory.
-        assert_eq!(
-            vhost_verdict(&c, &st, &root, None).state,
-            ModuleAvailability::Builtin
+        // `vhost_vsock` is `m` in this config and listed in /proc/modules: live, but
+        // nothing here says it was compiled into the image.
+        let v = vhost_verdict(&c, &st, &root, None);
+        assert_eq!(v.state, ModuleAvailability::Loaded, "{}", v.reason);
+        assert!(v.reason.contains("/proc/modules"), "{}", v.reason);
+        // A live transport trumps the config file even for a non-root user — and still
+        // only says "live", because `CONFIG_VHOST_VSOCK=m` here. The basis is whatever
+        // signal the caller measured; nothing here may invent a device node.
+        let v = vhost_verdict(
+            &c,
+            &module_state_from(&c, ModuleFacts::default()),
+            &none,
+            Some("registered in /proc/misc"),
         );
-        // A device node trumps the config file even for a non-root user.
-        assert_eq!(
-            vhost_verdict(
-                &c,
-                &module_state_from(&c, ModuleFacts::default()),
-                &none,
-                Some(true)
-            )
-            .state,
-            ModuleAvailability::Builtin
+        assert_eq!(v.state, ModuleAvailability::Loaded, "{}", v.reason);
+        assert!(
+            v.reason
+                .starts_with("vhost_vsock is live: registered in /proc/misc"),
+            "{}",
+            v.reason
         );
+        // Built-in is only claimed when the config says `y` *and* it is live.
+        let built_in = ConfigRead::from_text(
+            "t",
+            "CONFIG_MODULES=y\nCONFIG_VHOST_VSOCK=y\nCONFIG_VSOCKMON=m\n",
+        );
+        let v = vhost_verdict(
+            &built_in,
+            &module_state_from(&built_in, ModuleFacts::default()),
+            &none,
+            Some("device node present in /dev"),
+        );
+        assert_eq!(v.state, ModuleAvailability::Builtin, "{}", v.reason);
     }
 
     #[test]
@@ -648,7 +683,7 @@ mod tests {
             VerdictQuery {
                 name: "vsockmon",
                 caps: None,
-                node_present: None,
+                live_evidence: None,
                 dep_note: None,
             },
         );
@@ -665,7 +700,7 @@ mod tests {
             VerdictQuery {
                 name: "vsockmon",
                 caps: None,
-                node_present: None,
+                live_evidence: None,
                 dep_note: None,
             },
         );

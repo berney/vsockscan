@@ -418,6 +418,20 @@ mod tests {
     }
 
     #[test]
+    fn colour_changes_only_escape_sequences() {
+        // The colour contract for this renderer: an operator who strips SGR must get
+        // byte-identical YAML to the uncoloured run. Colour that shifts a scalar,
+        // breaks quoting, or lands in a key's colon would make `vsockscan -f yaml`
+        // pipe-into-yq differently depending on whether stdout was a terminal.
+        let off = s(&nasty(), ColorSupport::Off);
+        let on = s(&nasty(), ColorSupport::TrueColor);
+        assert_eq!(crate::render::json::strip_sgr(&on), off);
+        // And it really did colour something, or the equality above is vacuous.
+        assert!(on.contains("\x1b["), "{on}");
+        assert!(!off.contains("\x1b["), "{off}");
+    }
+
+    #[test]
     fn no_key_is_left_dangling() {
         // A `key:` whose next line is not a deeper body parses as `key: null`,
         // silently turning a container into nothing. Structural check, so it

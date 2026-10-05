@@ -160,8 +160,12 @@ fn parse(text: &str) -> BTreeMap<String, Sym> {
 pub struct ModuleFacts {
     /// `/proc/modules` was readable; its contents are in `loaded`.
     pub proc_modules_readable: bool,
-    /// Module names listed by `/proc/modules` (or implied by `/sys/module/<n>`).
+    /// Module names listed by `/proc/modules`.
     pub loaded: BTreeSet<String>,
+    /// Names that exist under `/sys/module/<n>`: a live module even where
+    /// `/proc/modules` is hidden. Kept apart from `loaded` so a verdict reason can
+    /// only name a signal that actually fired.
+    pub sys_module: BTreeSet<String>,
     /// Names from `/lib/modules/<release>/modules.builtin`.
     pub builtin: BTreeSet<String>,
     /// Names that have a `.ko*` under the scanned directories.
@@ -225,10 +229,12 @@ impl ModuleFacts {
             }
         }
         // A loaded module can be visible under /sys/module while /proc/modules is
-        // hidden (some container configs); count that as loaded.
+        // hidden (some container configs). It proves liveness, but not *which*
+        // source proved it, so it is recorded in its own field: a reason string that
+        // said "listed in /proc/modules" here would name a file nobody read.
         for n in names {
             if Path::new(&format!("/sys/module/{n}")).exists() {
-                f.loaded.insert((*n).to_string());
+                f.sys_module.insert((*n).to_string());
             }
         }
         f
@@ -344,18 +350,23 @@ fn verdict(cfg: &ConfigRead, st: &ModuleState, q: VerdictQuery<'_>) -> ModuleVer
     // than the signals support. Only `CONFIG_X=y` plus a live transport says builtin.
     let live = q.live_evidence;
     let in_modules = st.facts.loaded.contains(name);
-    if live.is_some() || in_modules {
+    let in_sysfs = st.facts.sys_module.contains(name);
+    if live.is_some() || in_modules || in_sysfs {
         let state = if sym == Sym::Yes {
             ModuleAvailability::Builtin
         } else {
             ModuleAvailability::Loaded
         };
-        let mut basis: Vec<&str> = Vec::new();
+        // One clause per signal that fired, and none that did not: the reader is
+        // being told how this was proved, so an unproven clause is a false citation.
+        let mut basis: Vec<String> = Vec::new();
         if let Some(ev) = live {
-            basis.push(ev);
+            basis.push(ev.to_string());
         }
         if in_modules {
-            basis.push("listed in /proc/modules");
+            basis.push("listed in /proc/modules".to_string());
+        } else if in_sysfs {
+            basis.push(format!("/sys/module/{name} exists"));
         }
         let mut reason = format!("{name} is live: {}", basis.join(", and "));
         if state == ModuleAvailability::Loaded && !st.facts.proc_modules_readable {
@@ -594,6 +605,44 @@ mod tests {
     }
 
     #[test]
+    fn a_live_reason_names_only_the_signal_that_fired() {
+        // A container with /proc/modules hidden still sees the module under
+        // /sys/module. That proves liveness, and the reason must cite sysfs: saying
+        // "listed in /proc/modules" would name a file this process never read.
+        let c = ConfigRead::from_text("t", "CONFIG_MODULES=y\nCONFIG_VHOST_VSOCK=m\n");
+        let caps = Caps::from_status("CapEff:\t0000000000000000\n", Some(40));
+        let sysfs = ModuleFacts {
+            proc_modules_readable: false,
+            sys_module: ["vhost_vsock".to_string()].into_iter().collect(),
+            ..ModuleFacts::default()
+        };
+        let v = vhost_verdict(&c, &module_state_from(&c, sysfs), &caps, None);
+        assert_eq!(v.state, ModuleAvailability::Loaded, "{}", v.reason);
+        assert!(
+            v.reason.contains("/sys/module/vhost_vsock exists"),
+            "{}",
+            v.reason
+        );
+        assert!(
+            !v.reason.contains("listed in /proc/modules"),
+            "{}",
+            v.reason
+        );
+        assert!(v.reason.contains("cannot be separated"), "{}", v.reason);
+
+        // The reverse mistake: a real /proc/modules listing must not be laundered
+        // into a vaguer sysfs claim.
+        let procs = ModuleFacts {
+            proc_modules_readable: true,
+            loaded: ["vhost_vsock".to_string()].into_iter().collect(),
+            ..ModuleFacts::default()
+        };
+        let v = vhost_verdict(&c, &module_state_from(&c, procs), &caps, None);
+        assert!(v.reason.contains("listed in /proc/modules"), "{}", v.reason);
+        assert!(!v.reason.contains("/sys/module"), "{}", v.reason);
+    }
+
+    #[test]
     fn loadable_needs_file_and_caps() {
         let c = ConfigRead::from_text(
             "t",
@@ -605,6 +654,7 @@ mod tests {
             files: ["vsockmon".to_string()].into_iter().collect(),
             modules_tree: true,
             builtin: Default::default(),
+            sys_module: Default::default(),
         };
         let st = module_state_from(&c, facts);
         let root = Caps::from_status("CapEff:\t0000003fffffffff\n", Some(40));

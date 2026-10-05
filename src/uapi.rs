@@ -7,7 +7,6 @@
 //! headers, so their layout is pinned from the wire format), and
 //! `include/uapi/linux/vhost.h`.
 
-
 /// `AF_VSOCK` (`include/linux/socket.h`). Not 40 by accident: `PF_VSOCK`.
 pub const AF_VSOCK: u16 = 40;
 
@@ -142,7 +141,9 @@ pub fn errno_name(err: i32) -> Option<&'static str> {
 
 /// Errno name, or `E<number>` — used everywhere a verdict is printed.
 pub fn errno_label(err: i32) -> String {
-    errno_name(err).map(str::to_owned).unwrap_or_else(|| format!("E{err}"))
+    errno_name(err)
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("E{err}"))
 }
 
 #[cfg(test)]
@@ -180,10 +181,18 @@ mod tests {
         assert_eq!(a.svm_flags, 0);
         assert_eq!(b.svm_flags, VMADDR_FLAG_TO_HOST);
         let ra = unsafe {
-            core::slice::from_ref(&a).as_ptr().cast::<u8>().add(12).read()
+            core::slice::from_ref(&a)
+                .as_ptr()
+                .cast::<u8>()
+                .add(12)
+                .read()
         };
         let rb = unsafe {
-            core::slice::from_ref(&b).as_ptr().cast::<u8>().add(12).read()
+            core::slice::from_ref(&b)
+                .as_ptr()
+                .cast::<u8>()
+                .add(12)
+                .read()
         };
         assert_eq!((ra, rb), (0, 1));
     }

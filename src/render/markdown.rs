@@ -42,7 +42,10 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
     writeln!(
         out,
         "- **vsock device**: {}{}",
-        c.fg(style::verdict_fg(h.device), &format!("`{}`", h.device.as_str())),
+        c.fg(
+            style::verdict_fg(h.device),
+            &format!("`{}`", h.device.as_str())
+        ),
         match &h.config_source {
             Some(s) => format!(" · config `{s}`"),
             None => String::new(),
@@ -142,10 +145,7 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
         writeln!(out)?;
         writeln!(out, "{}", c.bold("## Sock diag"))?;
         writeln!(out)?;
-        writeln!(
-            out,
-            "| src | dst | state | shutdown | ino | pid | cookie |"
-        )?;
+        writeln!(out, "| src | dst | state | shutdown | ino | pid | cookie |")?;
         writeln!(out, "| --- | --- | --- | --- | --- | --- | --- |")?;
         for e in &report.diag_entries {
             let pid = match (&e.pid, &e.pid_comm) {

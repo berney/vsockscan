@@ -199,7 +199,9 @@ const DIST_EXTRA: [u32; 30] = [
     13,
 ];
 /// Code-length code order of a dynamic block (RFC 1951 3.2.7).
-const CLO: [usize; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+const CLO: [usize; 19] = [
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+];
 
 fn fixed_tables() -> (Huff, Huff) {
     let mut lit = [0u8; 288];
@@ -510,7 +512,10 @@ mod tests {
         b.code(dc, dl);
         let (ec, el) = canon_code(&lit, 256); // end of block
         b.code(ec, el);
-        assert_eq!(gunzip(&wrap(&b.finish(), 9)).expect("fixed block"), b"abcabcabc");
+        assert_eq!(
+            gunzip(&wrap(&b.finish(), 9)).expect("fixed block"),
+            b"abcabcabc"
+        );
     }
 
     #[test]
@@ -606,7 +611,10 @@ mod tests {
         assert!(is_gzip(&raw));
         let text = String::from_utf8(gunzip(&raw).expect("real config inflates")).expect("utf-8");
         assert!(text.contains("CONFIG_NET=y"), "not a kernel config?");
-        assert!(text.lines().count() > 500, "a real config is bigger than this");
+        assert!(
+            text.lines().count() > 500,
+            "a real config is bigger than this"
+        );
     }
 
     #[test]
@@ -620,7 +628,11 @@ mod tests {
         ] {
             let gz = b64(src);
             assert!(is_gzip(&gz));
-            assert_eq!(gunzip(&gz).expect("fixed block decodes"), want, "fixture {src}");
+            assert_eq!(
+                gunzip(&gz).expect("fixed block decodes"),
+                want,
+                "fixture {src}"
+            );
         }
     }
 }

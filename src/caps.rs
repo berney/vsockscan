@@ -189,10 +189,19 @@ mod tests {
     fn unknown_bits_are_reported() {
         // A bit with no name in the table (41, just past CAP_CHECKPOINT_RESTORE)
         // is printed as `cap_41` rather than dropped.
-        assert_eq!(Caps::from_status("CapEff:\t0000020000000000\n", Some(41)).names(), vec!["cap_41"]);
+        assert_eq!(
+            Caps::from_status("CapEff:\t0000020000000000\n", Some(41)).names(),
+            vec!["cap_41"]
+        );
         // Bits past `cap_last_cap` are not printed: the kernel cannot have them.
-        assert_eq!(Caps::from_status("CapEff:\t0200000000000000\n", Some(40)).names(), Vec::<String>::new());
+        assert_eq!(
+            Caps::from_status("CapEff:\t0200000000000000\n", Some(40)).names(),
+            Vec::<String>::new()
+        );
         // With no cap_last_cap we fall back to the table's top and still show it.
-        assert_eq!(Caps::from_status("CapEff:\t0200000000000000\n", None).names(), vec!["cap_57"]);
+        assert_eq!(
+            Caps::from_status("CapEff:\t0200000000000000\n", None).names(),
+            vec!["cap_57"]
+        );
     }
 }

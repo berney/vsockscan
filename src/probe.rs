@@ -144,14 +144,14 @@ impl Tells {
         };
 
         // /proc/misc: `<minor> <name>` — proves the *core* registered, nothing more.
-        let misc_vsock_minor = std::fs::read_to_string("/proc/misc")
-            .ok()
-            .and_then(|t| {
-                t.lines().find_map(|l| {
-                    let (minor, name) = l.trim().split_once(char::is_whitespace)?;
-                    (name.trim() == "vsock").then(|| minor.parse::<u32>().ok()).flatten()
-                })
-            });
+        let misc_vsock_minor = std::fs::read_to_string("/proc/misc").ok().and_then(|t| {
+            t.lines().find_map(|l| {
+                let (minor, name) = l.trim().split_once(char::is_whitespace)?;
+                (name.trim() == "vsock")
+                    .then(|| minor.parse::<u32>().ok())
+                    .flatten()
+            })
+        });
 
         let dev_present = Path::new("/dev/vsock").exists();
         let mut dev_openable = false;
@@ -167,7 +167,7 @@ impl Tells {
                     let rc = unsafe {
                         libc::ioctl(
                             std::os::fd::AsRawFd::as_raw_fd(&f),
-                            uapi::IOCTL_GET_LOCAL_CID as libc::c_int,
+                            uapi::IOCTL_GET_LOCAL_CID as libc::Ioctl,
                             &mut cid as *mut u32,
                         )
                     };
@@ -201,7 +201,7 @@ impl Tells {
                     let rc = unsafe {
                         libc::ioctl(
                             std::os::fd::AsRawFd::as_raw_fd(&f),
-                            uapi::VHOST_GET_FEATURES as libc::c_int,
+                            uapi::VHOST_GET_FEATURES as libc::Ioctl,
                             &mut feats as *mut u64,
                         )
                     };
@@ -258,7 +258,11 @@ impl Tells {
         format!(
             "{} (openable: {}); {core} — this is the vsock *core* (vsock.ko), which is \
              registered even with no virtio transport, so it is not device evidence",
-            if self.dev_vsock_present { "/dev/vsock exists" } else { "no /dev/vsock" },
+            if self.dev_vsock_present {
+                "/dev/vsock exists"
+            } else {
+                "no /dev/vsock"
+            },
             self.dev_vsock_openable
         )
     }
@@ -362,8 +366,11 @@ fn cid_from_cmdline_or_dmesg() -> Option<u32> {
     for t in texts {
         for word in t.split_whitespace() {
             // `vsock_cid=3`, `guest_cid=3` — the shapes QEMU/cloud-hypervisor use.
-            let Some((k, v)) = word.split_once('=') else { continue };
-            if !(k.ends_with("guest_cid") || k.ends_with("vsock_cid") || k.ends_with("vmaddr_cid")) {
+            let Some((k, v)) = word.split_once('=') else {
+                continue;
+            };
+            if !(k.ends_with("guest_cid") || k.ends_with("vsock_cid") || k.ends_with("vmaddr_cid"))
+            {
                 continue;
             }
             if let Ok(cid) = v.parse::<u32>() {
@@ -411,7 +418,8 @@ pub fn canary(cfg: &ConfigRead) -> (TellState, String) {
         return (
             TellState::Inert,
             "CONFIG_VSOCKETS_LOOPBACK is not set: a connect to CID 2 cannot be redirected \
-             locally, so this guard has nothing to detect here".to_string(),
+             locally, so this guard has nothing to detect here"
+                .to_string(),
         );
     }
     // The listener. The guard's question is whether a connect to CID 2 lands on
@@ -563,22 +571,35 @@ pub fn nonblocking_connect(fd: libc::c_int, addr: &uapi::SockaddrVm, timeout_ms:
     }
     let immediate = errno();
     if immediate != libc::EINPROGRESS {
-        return Connect::Failed { errno: immediate, stage: "connect" };
+        return Connect::Failed {
+            errno: immediate,
+            stage: "connect",
+        };
     }
-    let mut p = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+    let mut p = libc::pollfd {
+        fd,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
     // SAFETY: poll on one descriptor we own.
     let pr = unsafe { libc::poll(&mut p, 1, timeout_ms) };
     if pr == 0 {
         return Connect::Timeout;
     }
     if pr < 0 {
-        return Connect::Failed { errno: errno(), stage: "poll" };
+        return Connect::Failed {
+            errno: errno(),
+            stage: "poll",
+        };
     }
     let soerr = sock_error(fd);
     if soerr == 0 {
         Connect::Established
     } else {
-        Connect::Failed { errno: soerr, stage: "SO_ERROR" }
+        Connect::Failed {
+            errno: soerr,
+            stage: "SO_ERROR",
+        }
     }
 }
 
@@ -590,7 +611,11 @@ pub fn sockname_port(fd: libc::c_int) -> Option<u32> {
 
 /// Accept with a short deadline and report the peer's `(cid, port)`.
 fn try_accept(listener: libc::c_int) -> Option<(u32, u32)> {
-    let mut p = libc::pollfd { fd: listener, events: libc::POLLIN, revents: 0 };
+    let mut p = libc::pollfd {
+        fd: listener,
+        events: libc::POLLIN,
+        revents: 0,
+    };
     if unsafe { libc::poll(&mut p, 1, 50) } != 1 {
         return None;
     }
@@ -688,7 +713,8 @@ pub fn collect(opts: &ProbeOpts) -> Report {
 
     // ---- tells -------------------------------------------------------------
     match &tells.virtio {
-        None => push(&mut report, 
+        None => push(
+            &mut report,
             "virtio-sysfs",
             TellState::Unknown,
             "cannot read /sys/bus/virtio/devices".to_string(),
@@ -709,28 +735,43 @@ pub fn collect(opts: &ProbeOpts) -> Report {
                         d.name,
                         d.device,
                         d.vendor,
-                        if d.modalias.is_empty() { String::new() } else { format!(" modalias={}", d.modalias) }
+                        if d.modalias.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" modalias={}", d.modalias)
+                        }
                     )
                 })
                 .collect();
             let hit = devs.iter().any(|d| d.device == VIRTIO_ID_VSOCK);
-            push(&mut report, 
+            push(
+                &mut report,
                 "virtio-id-0x0013",
                 if hit { TellState::Yes } else { TellState::No },
                 format!(
                     "{} virtio device(s): {}",
                     devs.len(),
-                    if seen.is_empty() { "none".to_string() } else { seen.join(", ") }
+                    if seen.is_empty() {
+                        "none".to_string()
+                    } else {
+                        seen.join(", ")
+                    }
                 ),
             );
         }
     }
-    push(&mut report, 
+    push(
+        &mut report,
         "dev-vsock",
-        if tells.dev_vsock_present { TellState::Yes } else { TellState::No },
+        if tells.dev_vsock_present {
+            TellState::Yes
+        } else {
+            TellState::No
+        },
         tells.dev_vsock_note(),
     );
-    push(&mut report, 
+    push(
+        &mut report,
         "ioctl-get-local-cid",
         match tells.ioctl_cid {
             Some(_) => TellState::Yes,
@@ -757,7 +798,11 @@ pub fn collect(opts: &ProbeOpts) -> Report {
         for (name, cid, kind) in [
             ("connect-cid1", uapi::VMADDR_CID_LOCAL, libc::SOCK_STREAM),
             ("connect-cid2", uapi::VMADDR_CID_HOST, libc::SOCK_STREAM),
-            ("connect-cid2-seqpacket", uapi::VMADDR_CID_HOST, libc::SOCK_SEQPACKET),
+            (
+                "connect-cid2-seqpacket",
+                uapi::VMADDR_CID_HOST,
+                libc::SOCK_SEQPACKET,
+            ),
         ] {
             if !opts.seqpacket && kind == libc::SOCK_SEQPACKET {
                 continue;
@@ -797,17 +842,19 @@ pub fn collect(opts: &ProbeOpts) -> Report {
             .collect();
         let agree = plain.len() == flagged.len()
             && plain.iter().zip(flagged).all(|(a, b)| {
-                a.name == b.name && a.outcome.kind == b.outcome.kind && a.outcome.errno == b.outcome.errno
+                a.name == b.name
+                    && a.outcome.kind == b.outcome.kind
+                    && a.outcome.errno == b.outcome.errno
             });
         if agree {
             report.summary.notes.push(
-                "VMADDR_FLAG_TO_HOST had no observable effect here: every probe answers the                  same with and without it"
+                "VMADDR_FLAG_TO_HOST had no observable effect here: every probe answers the same with and without it"
                     .to_string(),
             );
         } else {
             report.finding(
                 Severity::Warn,
-                "VMADDR_FLAG_TO_HOST changed at least one probe answer; compare the paired rows                  before drawing any conclusion",
+                "VMADDR_FLAG_TO_HOST changed at least one probe answer; compare the paired rows before drawing any conclusion",
             );
         }
     }
@@ -819,33 +866,48 @@ pub fn collect(opts: &ProbeOpts) -> Report {
             (true, Some(true)) => {
                 Outcome::new(OutcomeKind::Open).with_detail("device node openable")
             }
-            (true, Some(false)) => {
-                errno_out(tells.vhost_errno.unwrap_or(libc::EACCES), "node exists, open failed")
-            }
-            _ => Outcome::new(OutcomeKind::RefusedKernel)
-                .with_detail("/dev/vhost-vsock absent"),
+            (true, Some(false)) => errno_out(
+                tells.vhost_errno.unwrap_or(libc::EACCES),
+                "node exists, open failed",
+            ),
+            _ => Outcome::new(OutcomeKind::RefusedKernel).with_detail("/dev/vhost-vsock absent"),
         },
         value: tells.vhost_features.map(|f| format!("{f:#018x}")),
         flags: FlagSet::None,
     });
 
-    push(&mut report, 
+    push(
+        &mut report,
         "loopback-canary",
         canary_state,
         canary_why.clone(),
     );
 
     // ---- config / modules --------------------------------------------------
+    if opts.vsockmon && !opts.config {
+        // The vsockmon verdict *is* a config question (it depends on VHOST_VSOCK),
+        // and silence would leave the reader to guess whether the module is absent
+        // or was simply never looked at. Those are different answers.
+        report.finding(
+            Severity::Warn,
+            "`--vsockmon` needs `--config`: module availability is read from the kernel              config, and none was read, so nothing is known about vsockmon here",
+        );
+    }
     if opts.config {
         let state: ModuleState = kernconfig::module_state(&cfg, &release, WATCHED);
-        let mut verdicts: Vec<ModuleVerdict> =
-            vec![kernconfig::vhost_verdict(&cfg, &state, &caps, Some(tells.vhost_node_present))];
+        let mut verdicts: Vec<ModuleVerdict> = vec![kernconfig::vhost_verdict(
+            &cfg,
+            &state,
+            &caps,
+            Some(tells.vhost_node_present),
+        )];
         if opts.vsockmon {
             verdicts.push(kernconfig::vsockmon_verdict(&cfg, &state, &caps));
         }
         for sym in CONFIG_SYMBOLS {
             let v = cfg.symbol(sym);
-            push(&mut report, 
+            push(
+                &mut report,
                 &format!("config:{sym}"),
                 match v {
                     Sym::Yes | Sym::Module => TellState::Yes,
@@ -855,10 +917,7 @@ pub fn collect(opts: &ProbeOpts) -> Report {
                 format!("CONFIG_{sym} = {} ({})", v.as_str(), cfg.describe()),
             );
         }
-        report.finding(
-            Severity::Info,
-            format!("module state: {}", state.reason),
-        );
+        report.finding(Severity::Info, format!("module state: {}", state.reason));
         report.header.module_verdicts = verdicts;
         if opts.mmio {
             report.findings.push(Finding {
@@ -890,13 +949,13 @@ pub fn collect(opts: &ProbeOpts) -> Report {
     if !caps.net_bind_service() {
         report.finding(
             Severity::Info,
-            "no CAP_NET_BIND_SERVICE: `listen --census` on ports below 1024 answers EACCES here              (measured: the check is on the supplied port, not the assigned one)",
+            "no CAP_NET_BIND_SERVICE: `listen --census` on ports below 1024 answers EACCES here (measured: the check is on the supplied port, not the assigned one)",
         );
     }
     if opts.mmio && !caps.sys_admin() {
         report.finding(
             Severity::Warn,
-            "--mmio was requested without CAP_SYS_ADMIN: /dev/mem will refuse the read              regardless of iomem=relaxed",
+            "--mmio was requested without CAP_SYS_ADMIN: /dev/mem will refuse the read regardless of iomem=relaxed",
         );
     }
     if matches!(device, Verdict::Present) && tells.vhost_node_present {
@@ -910,7 +969,9 @@ pub fn collect(opts: &ProbeOpts) -> Report {
         match diag::census_with_pids(diag::ALL_STATES) {
             Ok(rows) => {
                 report.diag_entries = rows.clone();
-                DiagStatus::Available { entries: rows.len() }
+                DiagStatus::Available {
+                    entries: rows.len(),
+                }
             }
             Err(e) => DiagStatus::Unavailable(e.to_string()),
         }
@@ -926,7 +987,12 @@ pub fn collect(opts: &ProbeOpts) -> Report {
 }
 
 /// One non-blocking connect, classified the same way `scan` will classify rows.
-fn connect_probe(cid: u32, port: u32, to_host: bool, kind: libc::c_int) -> (Outcome, Option<String>) {
+fn connect_probe(
+    cid: u32,
+    port: u32,
+    to_host: bool,
+    kind: libc::c_int,
+) -> (Outcome, Option<String>) {
     let fd = match vsock_socket(kind) {
         Ok(fd) => fd,
         Err(e) => return (Outcome::new(OutcomeKind::Unsupported).with_detail(e), None),
@@ -969,7 +1035,7 @@ pub fn vsockmon_up(name: &str, report: &mut Report) {
         report.finding(
             Severity::Warn,
             format!(
-                "--vsockmon-up {name} refused before running `ip`: CAP_NET_ADMIN is required                  to create a netlink interface"
+                "--vsockmon-up {name} refused before running `ip`: CAP_NET_ADMIN is required to create a netlink interface"
             ),
         );
         report.tells.push(Tell {
@@ -987,42 +1053,69 @@ pub fn vsockmon_up(name: &str, report: &mut Report) {
             Err(e) => Err(format!("cannot run `ip`: {e}")),
         }
     };
-    let state = match run(&["link", "add", name, "type", "vsockmon"])
-        .and_then(|_| run(&["link", "set", name, "up"]))
-    {
-        Ok(()) => {
-            report.finding(
-                Severity::Warn,
-                format!(
-                    "created vsockmon interface {name}; capture it with `ip link set {name} up` \
-                     (done) and `tcpdump -i {name} -w vsock.pcap`. Note: Firecracker's vsock is \
-                     **userspace** — its traffic never appears on vsockmon. Capture needs a \
-                     kernel vhost-vsock host (see notes/vsock/03). Delete it with \
-                     `ip link del {name}`."
-                ),
-            );
-            TellState::Yes
-        }
-        Err(e) => {
-            report.finding(
-                Severity::Warn,
-                format!("could not create vsockmon {name}: {e} (needs CAP_NET_ADMIN and a kernel \
-                         with CONFIG_VSOCKMON)"),
-            );
-            TellState::No
-        }
+    let outcome = run(&["link", "add", name, "type", "vsockmon"])
+        .and_then(|_| run(&["link", "set", name, "up"]));
+    let (state, detail) = match &outcome {
+        Ok(()) => (TellState::Yes, vsockmon_up_detail(name, None)),
+        Err(e) => (TellState::No, vsockmon_up_detail(name, Some(e))),
     };
+    match &outcome {
+        Ok(()) => report.finding(Severity::Warn, vsockmon_created(name)),
+        Err(e) => report.finding(Severity::Warn, vsockmon_refused(name, e)),
+    }
     report.tells.push(Tell {
         id: "vsockmon-up".to_string(),
         state,
-        detail: format!("ip link add {name} type vsockmon && ip link set {name} up"),
+        detail,
     });
+}
+
+/// The capture recipe, printed only when the interface actually exists.
+/// Hypervisors with userspace vsock implementations do not pass traffic through
+/// kernel vhost-vsock, so vsockmon sees kernel vhost-vsock traffic only.
+fn vsockmon_created(name: &str) -> String {
+    format!(
+        "created vsockmon interface {name} (already up); capture with `tcpdump -i {name} -w \
+         vsock.pcap`. Note: userspace vsock traffic does not appear here; \
+         this captures kernel vhost-vsock traffic only. Remove it with `ip link \
+         del {name}`."
+    )
+}
+
+fn vsockmon_refused(name: &str, e: &str) -> String {
+    format!(
+        "could not create vsockmon {name}: {e} (needs CAP_NET_ADMIN and a kernel with \
+         CONFIG_VSOCKMON)"
+    )
+}
+
+/// What the tell says after the attempt: the recipe on success, the refusal on
+/// failure. Printing the command as the detail either way reads as a plan the
+/// reader cannot tell from a result.
+fn vsockmon_up_detail(name: &str, error: Option<&str>) -> String {
+    match error {
+        Some(e) => format!("not created: {e}"),
+        None => format!("created and up; tcpdump -i {name} -w vsock.pcap"),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::kernconfig::ConfigRead;
+
+    #[test]
+    fn vsockmon_up_reports_the_outcome_not_the_intention() {
+        assert_eq!(
+            vsockmon_up_detail("vsockmon0", None),
+            "created and up; tcpdump -i vsockmon0 -w vsock.pcap"
+        );
+        let bad = vsockmon_up_detail("vsockmon0", Some("Error: Unknown device type."));
+        assert!(bad.starts_with("not created: "), "{bad}");
+        assert!(!bad.contains("tcpdump"), "{bad}");
+        assert!(vsockmon_refused("vm0", "boom").contains("CONFIG_VSOCKMON"));
+        assert!(vsockmon_created("vm0").contains("userspace"));
+    }
 
     fn cfg(text: &str) -> ConfigRead {
         ConfigRead::from_text("t", text)
@@ -1052,7 +1145,8 @@ mod tests {
         }
     }
 
-    const TARGET: &str = "CONFIG_VSOCKETS=y\nCONFIG_VIRTIO_VSOCKETS=y\nCONFIG_VIRTIO_VSOCKETS_COMMON=y\n";
+    const TARGET: &str =
+        "CONFIG_VSOCKETS=y\nCONFIG_VIRTIO_VSOCKETS=y\nCONFIG_VIRTIO_VSOCKETS_COMMON=y\n";
 
     #[test]
     fn id_19_is_the_only_positive_tell() {
@@ -1063,8 +1157,7 @@ mod tests {
             Verdict::AbsentButDriver
         );
         assert_eq!(
-            tells_with(Some(vec![(0x13, 0)]))
-                .device_verdict(&cfg("CONFIG_VIRTIO_VSOCKETS=n\n")),
+            tells_with(Some(vec![(0x13, 0)])).device_verdict(&cfg("CONFIG_VIRTIO_VSOCKETS=n\n")),
             Verdict::Present,
             "a bound device outranks the config file"
         );
@@ -1136,7 +1229,11 @@ mod tests {
         let s = sysctls();
         // On Linux /proc/sys/net/vsock either exists (7.2.0) or does not
         // (6.1/6.8); either way the three known keys must be accounted for.
-        for k in ["net.vsock.ns_mode", "net.vsock.child_ns_mode", "net.vsock.g2h_fallback"] {
+        for k in [
+            "net.vsock.ns_mode",
+            "net.vsock.child_ns_mode",
+            "net.vsock.g2h_fallback",
+        ] {
             assert!(s.iter().any(|(n, _)| n == k), "missing {k} in {s:?}");
         }
         assert!(
@@ -1155,7 +1252,11 @@ mod tests {
     #[test]
     fn socket_probe_records_inode_or_errno() {
         let (o, v) = socket_probe(libc::SOCK_STREAM);
-        assert_eq!(o.kind, OutcomeKind::Open, "AF_VSOCK STREAM always exists here: {o:?}");
+        assert_eq!(
+            o.kind,
+            OutcomeKind::Open,
+            "AF_VSOCK STREAM always exists here: {o:?}"
+        );
         assert!(v.unwrap().starts_with("ino "), "must show the socket inode");
     }
 }

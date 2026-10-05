@@ -76,7 +76,13 @@ impl E {
 
     /// `key:` for a list, or `key: []` when it is empty (a dangling `key:` with
     /// nothing under it parses as null, not as an empty list).
-    fn open_list(&mut self, out: &mut dyn Write, indent: usize, key: &str, empty: bool) -> io::Result<()> {
+    fn open_list(
+        &mut self,
+        out: &mut dyn Write,
+        indent: usize,
+        key: &str,
+        empty: bool,
+    ) -> io::Result<()> {
         let key = self.key(key);
         if empty {
             writeln!(out, "{}{key}: []", " ".repeat(indent))
@@ -98,7 +104,11 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
     let mut y = E { c };
     let h = &report.header;
 
-    writeln!(out, "# vsockscan {} report ({})", report.command, report.version)?;
+    writeln!(
+        out,
+        "# vsockscan {} report ({})",
+        report.command, report.version
+    )?;
     y.pair(out, 0, "tool", Val::Str(report.tool.clone()))?;
     y.pair(out, 0, "version", Val::Str(report.version.clone()))?;
     y.pair(out, 0, "command", Val::Str(report.command.clone()))?;
@@ -131,10 +141,7 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
         out,
         2,
         "device",
-        Val::Painted(
-            y.c
-                .fg(style::verdict_fg(h.device), &quote(h.device.as_str())),
-        ),
+        Val::Painted(y.c.fg(style::verdict_fg(h.device), &quote(h.device.as_str()))),
     )?;
     y.pair(
         out,
@@ -254,7 +261,12 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
     }
 
     y.open(out, 0, "summary")?;
-    y.pair(out, 2, "results", Val::Raw(report.summary.results.to_string()))?;
+    y.pair(
+        out,
+        2,
+        "results",
+        Val::Raw(report.summary.results.to_string()),
+    )?;
     if report.summary.by_outcome.is_empty() {
         let key = y.key("by-outcome");
         writeln!(out, "  {key}: {{}}")?;
@@ -273,7 +285,12 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
             None => Val::Null,
         },
     )?;
-    y.pair(out, 2, "elapsed-ms", Val::Raw(report.summary.elapsed_ms.to_string()))?;
+    y.pair(
+        out,
+        2,
+        "elapsed-ms",
+        Val::Raw(report.summary.elapsed_ms.to_string()),
+    )?;
     y.open_list(out, 2, "notes", report.summary.notes.is_empty())?;
     y.strings(out, 4, &report.summary.notes)?;
     Ok(())
@@ -286,10 +303,7 @@ fn outcome(y: &mut E, out: &mut dyn Write, indent: usize, o: &Outcome) -> io::Re
         out,
         inner,
         "kind",
-        Val::Painted(
-            y.c
-                .fg(style::outcome_fg(o.kind), &quote(o.kind.as_str())),
-        ),
+        Val::Painted(y.c.fg(style::outcome_fg(o.kind), &quote(o.kind.as_str()))),
     )?;
     y.pair(
         out,
@@ -395,7 +409,10 @@ mod tests {
         let y = s(&nasty(), ColorSupport::Off);
         assert!(y.contains("\"line1\\nline2: quoted \\\"value\\\""), "{y}");
         assert!(y.contains("banner: \"- # null\""), "{y}");
-        assert!(y.contains("noise: \"frames with dst_cid 2 leave: yes | no | maybe\""), "{y}");
+        assert!(
+            y.contains("noise: \"frames with dst_cid 2 leave: yes | no | maybe\""),
+            "{y}"
+        );
         assert!(y.contains("message: \"0xdead:beef\""));
         assert!(y.contains("\"absent\""));
     }
@@ -405,7 +422,10 @@ mod tests {
         // A `key:` whose next line is not a deeper body parses as `key: null`,
         // silently turning a container into nothing. Structural check, so it
         // does not need a whitelist of legal openers.
-        let y = s(&Report::new("probe", placeholder_header()), ColorSupport::Off);
+        let y = s(
+            &Report::new("probe", placeholder_header()),
+            ColorSupport::Off,
+        );
         let lines: Vec<&str> = y.lines().filter(|l| !l.starts_with('#')).collect();
         for i in 0..lines.len() {
             let t = lines[i].trim_end();
@@ -472,7 +492,10 @@ mod tests {
     fn nested_shapes_use_consistent_indent() {
         let y = s(&nasty(), ColorSupport::Off);
         assert!(y.contains("rows:\n  - cid: 2"), "{y}");
-        assert!(y.contains("    outcome:\n      kind: \"refused-kernel\""), "{y}");
+        assert!(
+            y.contains("    outcome:\n      kind: \"refused-kernel\""),
+            "{y}"
+        );
         assert!(y.contains("      errno: 19"), "{y}");
     }
 }

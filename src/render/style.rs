@@ -196,16 +196,37 @@ mod tests {
     fn gating_matrix() {
         // tty, NO_COLOR, TERM, --no-color -> expectation
         // (case, tty, NO_COLOR, TERM, --no-color, expect colour)
-        type Gate = (&'static str, bool, Option<&'static str>, Option<&'static str>, bool, bool);
+        type Gate = (
+            &'static str,
+            bool,
+            Option<&'static str>,
+            Option<&'static str>,
+            bool,
+            bool,
+        );
         let cases: &[Gate] = &[
             ("tty clean", true, None, None, false, true),
             ("pipe clean", false, None, None, false, false),
             ("NO_COLOR present", true, Some(""), None, false, false),
             ("NO_COLOR set", true, Some("1"), None, false, false),
             ("TERM=dumb", true, None, Some("dumb"), false, false),
-            ("TERM=xterm", true, None, Some("xterm-256color"), false, true),
+            (
+                "TERM=xterm",
+                true,
+                None,
+                Some("xterm-256color"),
+                false,
+                true,
+            ),
             ("flag wins over tty", true, None, None, true, false),
-            ("flag and env agree", true, Some("1"), Some("dumb"), true, false),
+            (
+                "flag and env agree",
+                true,
+                Some("1"),
+                Some("dumb"),
+                true,
+                false,
+            ),
         ];
         for (name, tty, no_color, term, flag, want_color) in cases {
             let mut pairs = Vec::new();

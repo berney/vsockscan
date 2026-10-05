@@ -73,9 +73,7 @@ pub fn highlight(doc: &str) -> String {
                 let raw = &doc[i..=end];
                 // A string is a key iff the next non-whitespace byte is ':'.
                 let is_key = matches!(
-                    b[end + 1..]
-                        .iter()
-                        .find(|c| !c.is_ascii_whitespace()),
+                    b[end + 1..].iter().find(|c| !c.is_ascii_whitespace()),
                     Some(b':')
                 );
                 let inner = &raw[1..raw.len() - 1];
@@ -98,7 +96,9 @@ pub fn highlight(doc: &str) -> String {
                 if b[i] == b'-' {
                     i += 1;
                 }
-                while i < b.len() && (b[i].is_ascii_digit() || matches!(b[i], b'.' | b'e' | b'E' | b'+' | b'-')) {
+                while i < b.len()
+                    && (b[i].is_ascii_digit() || matches!(b[i], b'.' | b'e' | b'E' | b'+' | b'-'))
+                {
                     i += 1;
                 }
                 out.push_str(&tint(style::WARNING_AMBER, &doc[start..i]));

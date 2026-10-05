@@ -11,7 +11,7 @@
 //! `skipped` with the reason rather than passing by silence or failing by shape.
 
 use crate::listen;
-use crate::model::{Outcome, OutcomeKind, Report, Severity, Format};
+use crate::model::{Format, Outcome, OutcomeKind, Report, Severity};
 use crate::probe::{self, Connect};
 use crate::scan::{self, FlagMode, Job};
 use crate::uapi;
@@ -42,13 +42,25 @@ pub struct Check {
 
 impl Check {
     fn pass(name: &str, detail: impl Into<String>) -> Self {
-        Self { name: name.to_string(), status: Status::Pass, detail: detail.into() }
+        Self {
+            name: name.to_string(),
+            status: Status::Pass,
+            detail: detail.into(),
+        }
     }
     fn fail(name: &str, detail: impl Into<String>) -> Self {
-        Self { name: name.to_string(), status: Status::Fail, detail: detail.into() }
+        Self {
+            name: name.to_string(),
+            status: Status::Fail,
+            detail: detail.into(),
+        }
     }
     fn skip(name: &str, detail: impl Into<String>) -> Self {
-        Self { name: name.to_string(), status: Status::Skipped, detail: detail.into() }
+        Self {
+            name: name.to_string(),
+            status: Status::Skipped,
+            detail: detail.into(),
+        }
     }
 }
 
@@ -115,10 +127,18 @@ pub fn run() -> Vec<Check> {
     let jobs = jobs_for(&[uapi::VMADDR_CID_LOCAL, uapi::VMADDR_CID_HOST], &ports);
     // Raw sweep: no canary relabelling, because step 1 is about what the kernel
     // answered before this tool interprets it.
-    let rows = scan::sweep(&jobs, 8, 1000, 0);
+    let (rows, _) = scan::sweep(
+        &jobs,
+        8,
+        1000,
+        0,
+        &std::sync::atomic::AtomicBool::new(false),
+    );
 
     checks.push(check_no_invented_open(&rows, &listening, &free));
-    checks.push(check_listeners_are_distinguishable(&rows, &listening, &free));
+    checks.push(check_listeners_are_distinguishable(
+        &rows, &listening, &free,
+    ));
     checks.push(check_listeners_agree_with_each_other(&rows, &listening));
     checks.push(check_every_verdict_carries_its_signal(&rows));
 
@@ -158,8 +178,10 @@ fn check_fixture_bound(listening: &[u32], free: &[u32]) -> Check {
     }
     Check::pass(
         "fixture-binds",
-        format!("four listeners on kernel-assigned ports {listening:?}, four released ports \
-                {free:?} as controls"),
+        format!(
+            "four listeners on kernel-assigned ports {listening:?}, four released ports \
+                {free:?} as controls"
+        ),
     )
 }
 
@@ -183,7 +205,10 @@ fn check_no_invented_open(
     if bad.is_empty() {
         Check::pass(
             "no-invented-open",
-            format!("no control port was reported open across {} rows", rows.len()),
+            format!(
+                "no control port was reported open across {} rows",
+                rows.len()
+            ),
         )
     } else {
         Check::fail(
@@ -249,8 +274,10 @@ fn check_listeners_agree_with_each_other(
     if listening.len() < 4 {
         return Check::skip("listeners-agree", "fixture did not bind");
     }
-    let mut groups: std::collections::BTreeMap<(u32, &'static str), std::collections::BTreeSet<String>> =
-        Default::default();
+    let mut groups: std::collections::BTreeMap<
+        (u32, &'static str),
+        std::collections::BTreeSet<String>,
+    > = Default::default();
     for r in rows.iter().filter(|r| listening.contains(&r.port)) {
         groups
             .entry((r.cid, r.flags.label()))
@@ -260,7 +287,9 @@ fn check_listeners_agree_with_each_other(
     let mixed: Vec<String> = groups
         .iter()
         .filter(|(_, kinds)| kinds.len() > 1)
-        .map(|((cid, flag), kinds)| format!("CID {cid}/{flag}: {:?}", kinds.iter().collect::<Vec<_>>()))
+        .map(|((cid, flag), kinds)| {
+            format!("CID {cid}/{flag}: {:?}", kinds.iter().collect::<Vec<_>>())
+        })
         .collect();
     if mixed.is_empty() {
         Check::pass(
@@ -268,7 +297,10 @@ fn check_listeners_agree_with_each_other(
             format!("all four listeners classified identically within each of the {} (cid, flag) groups", groups.len()),
         )
     } else {
-        Check::fail("listeners-agree", format!("identical listeners differed: {mixed:?}"))
+        Check::fail(
+            "listeners-agree",
+            format!("identical listeners differed: {mixed:?}"),
+        )
     }
 }
 
@@ -293,7 +325,7 @@ fn check_every_verdict_carries_its_signal(rows: &[crate::model::ScanRow]) -> Che
         Check::pass(
             "verdicts-carry-errno",
             format!(
-                "{} rows, every non-open one naming an errno or explaining itself                  ({silent_timeouts} poll timeouts)",
+                "{} rows, every non-open one naming an errno or explaining itself ({silent_timeouts} poll timeouts)",
                 rows.len()
             ),
         )
@@ -307,9 +339,18 @@ fn check_every_verdict_carries_its_signal(rows: &[crate::model::ScanRow]) -> Che
 
 fn check_enodev_is_never_open() -> Check {
     let bad = [
-        Connect::Failed { errno: libc::ENODEV, stage: "connect" },
-        Connect::Failed { errno: libc::ENODEV, stage: "SO_ERROR" },
-        Connect::Failed { errno: libc::ENODEV, stage: "poll" },
+        Connect::Failed {
+            errno: libc::ENODEV,
+            stage: "connect",
+        },
+        Connect::Failed {
+            errno: libc::ENODEV,
+            stage: "SO_ERROR",
+        },
+        Connect::Failed {
+            errno: libc::ENODEV,
+            stage: "poll",
+        },
     ]
     .iter()
     .filter(|c| scan::classify(c).kind == OutcomeKind::Open)
@@ -321,14 +362,22 @@ fn check_enodev_is_never_open() -> Check {
              'no transport' and 'transport with no device bound'",
         )
     } else {
-        Check::fail("enodev-never-open", format!("{bad} ENODEV cases mapped to open"))
+        Check::fail(
+            "enodev-never-open",
+            format!("{bad} ENODEV cases mapped to open"),
+        )
     }
 }
 
 fn check_immediate_reset_is_never_silent() -> Check {
-    let o = scan::classify(&Connect::Failed { errno: libc::ECONNRESET, stage: "connect" });
+    let o = scan::classify(&Connect::Failed {
+        errno: libc::ECONNRESET,
+        stage: "connect",
+    });
     let t = scan::classify(&Connect::Timeout);
-    if o.kind != OutcomeKind::Silent && o.kind == OutcomeKind::Closed && t.kind == OutcomeKind::Silent
+    if o.kind != OutcomeKind::Silent
+        && o.kind == OutcomeKind::Closed
+        && t.kind == OutcomeKind::Silent
     {
         Check::pass(
             "reset-is-not-timeout",
@@ -338,7 +387,10 @@ fn check_immediate_reset_is_never_silent() -> Check {
     } else {
         Check::fail(
             "reset-is-not-timeout",
-            format!("ECONNRESET-immediate -> {:?}, timeout -> {:?}", o.kind, t.kind),
+            format!(
+                "ECONNRESET-immediate -> {:?}, timeout -> {:?}",
+                o.kind, t.kind
+            ),
         )
     }
 }
@@ -352,8 +404,13 @@ fn check_schema_is_json_and_report_round_trips() -> Check {
     }
     let report = sample_report();
     let mut buf = Vec::new();
-    if crate::render::render(&report, Format::Json, crate::render::ColorSupport::Off, &mut buf)
-        .is_err()
+    if crate::render::render(
+        &report,
+        Format::Json,
+        crate::render::ColorSupport::Off,
+        &mut buf,
+    )
+    .is_err()
     {
         return Check::fail("schema-and-round-trip", "rendering JSON failed");
     }
@@ -423,7 +480,9 @@ fn sample_report() -> Report {
         pid_comm: Some("init".into()),
     });
     r.finding(Severity::Warn, "a note worth reading");
-    r.summary.notes.push("first bytes:\n00000000  7f 45 4c 46   |.ELF|".into());
+    r.summary
+        .notes
+        .push("first bytes:\n00000000  7f 45 4c 46   |.ELF|".into());
     r.recompute_summary(3);
     r
 }
@@ -438,7 +497,10 @@ pub fn into_report(checks: &[Check], header: crate::model::Header) -> Report {
             Status::Skipped => Severity::Warn,
             Status::Fail => Severity::Alert,
         };
-        r.finding(severity, format!("check {} {}: {}", c.name, c.status.as_str(), c.detail));
+        r.finding(
+            severity,
+            format!("check {} {}: {}", c.name, c.status.as_str(), c.detail),
+        );
     }
     let (pass, fail, skip) = counts(checks);
     r.summary.results = checks.len();
@@ -451,7 +513,10 @@ pub fn into_report(checks: &[Check], header: crate::model::Header) -> Report {
 pub fn counts(checks: &[Check]) -> (usize, usize, usize) {
     let pass = checks.iter().filter(|c| c.status == Status::Pass).count();
     let fail = checks.iter().filter(|c| c.status == Status::Fail).count();
-    let skip = checks.iter().filter(|c| c.status == Status::Skipped).count();
+    let skip = checks
+        .iter()
+        .filter(|c| c.status == Status::Skipped)
+        .count();
     (pass, fail, skip)
 }
 
@@ -470,7 +535,12 @@ mod tests {
         let checks = run();
         assert!(checks.len() >= 8, "{:?}", checks.len());
         for c in &checks {
-            assert!(c.status != Status::Fail, "check {} failed: {}", c.name, c.detail);
+            assert!(
+                c.status != Status::Fail,
+                "check {} failed: {}",
+                c.name,
+                c.detail
+            );
             assert!(!c.detail.is_empty(), "{} carries no detail", c.name);
         }
         let (pass, fail, skip) = counts(&checks);
@@ -481,7 +551,10 @@ mod tests {
     fn pure_checks_pass_without_touching_the_socket_layer() {
         assert_eq!(check_enodev_is_never_open().status, Status::Pass);
         assert_eq!(check_immediate_reset_is_never_silent().status, Status::Pass);
-        assert_eq!(check_schema_is_json_and_report_round_trips().status, Status::Pass);
+        assert_eq!(
+            check_schema_is_json_and_report_round_trips().status,
+            Status::Pass
+        );
     }
 
     #[test]

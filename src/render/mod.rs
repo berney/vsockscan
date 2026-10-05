@@ -251,12 +251,7 @@ mod tests {
     #[test]
     fn file_output_equals_no_color_output_in_every_format() {
         // The contract: `-o FILE` is byte-identical to `--no-color`.
-        for f in [
-            Format::Text,
-            Format::Markdown,
-            Format::Json,
-            Format::Yaml,
-        ] {
+        for f in [Format::Text, Format::Markdown, Format::Json, Format::Yaml] {
             let off = render_str(f, ColorSupport::Off);
             assert!(!off.contains('\x1b'), "{f:?} emitted SGR while off");
         }
@@ -264,12 +259,7 @@ mod tests {
 
     #[test]
     fn colored_output_differs_but_resets_balanced() {
-        for f in [
-            Format::Text,
-            Format::Markdown,
-            Format::Json,
-            Format::Yaml,
-        ] {
+        for f in [Format::Text, Format::Markdown, Format::Json, Format::Yaml] {
             let on = render_str(f, ColorSupport::TrueColor);
             assert!(on.contains("\x1b[38;2;"), "{f:?} coloured nothing");
             assert!(
@@ -314,22 +304,31 @@ mod tests {
             .collect();
         assert_eq!(
             order,
-            vec!["tool", "version", "command", "header", "tells", "probes", "rows", "diag-entries", "findings", "summary"]
+            vec![
+                "tool",
+                "version",
+                "command",
+                "header",
+                "tells",
+                "probes",
+                "rows",
+                "diag-entries",
+                "findings",
+                "summary"
+            ]
         );
     }
 
     #[test]
     fn empty_report_renders_in_all_formats() {
         let r = Report::new("probe", placeholder_header());
-        for f in [
-            Format::Text,
-            Format::Markdown,
-            Format::Json,
-            Format::Yaml,
-        ] {
+        for f in [Format::Text, Format::Markdown, Format::Json, Format::Yaml] {
             let mut buf = Vec::new();
             render(&r, f, ColorSupport::Off, &mut buf).unwrap();
-            assert!(!buf.is_empty(), "{f:?} rendered nothing for an empty report");
+            assert!(
+                !buf.is_empty(),
+                "{f:?} rendered nothing for an empty report"
+            );
         }
         let j = {
             let mut buf = Vec::new();
@@ -351,11 +350,11 @@ mod tests {
             .collect::<Vec<_>>();
         let mut buf = Vec::new();
         render(&sample(), Format::Json, ColorSupport::Off, &mut buf).unwrap();
-        let doc: serde_json::Value = serde_json::from_str(&String::from_utf8(buf).unwrap()).unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(buf).unwrap()).unwrap();
         let keys: Vec<String> = doc.as_object().unwrap().keys().cloned().collect();
         assert_eq!(
-            keys,
-            props,
+            keys, props,
             "serialized report and schema disagree on top-level keys/order"
         );
         // Nested shapes we care about drift on:
@@ -366,7 +365,12 @@ mod tests {
             .keys()
             .cloned()
             .collect::<Vec<_>>();
-        let doc_header = doc["header"].as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        let doc_header = doc["header"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
         assert_eq!(header, doc_header, "header key drift");
     }
 }

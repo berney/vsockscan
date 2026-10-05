@@ -46,16 +46,11 @@ pub const REQUEST_LEN: usize = 40;
 /// NLM_F_ROOT|NLM_F_MATCH|NLM_F_REQUEST, seq, pid=0}` then
 /// `{family=40, protocol=0, pad=0, states, ino=0, src_port=0, dst_port=0, extra=0}`.
 pub fn build_request(states: u32, seq: u32) -> Vec<u8> {
-    let payload: Vec<u8> = [
-        uapi::AF_VSOCK as u8,
-        0u8,
-        0u8,
-        0u8,
-    ]
-    .into_iter()
-    .chain(states.to_le_bytes())
-    .chain([0u8; 16]) // idiag_ino, src_port, dst_port, extra: all zero for a dump
-    .collect();
+    let payload: Vec<u8> = [uapi::AF_VSOCK as u8, 0u8, 0u8, 0u8]
+        .into_iter()
+        .chain(states.to_le_bytes())
+        .chain([0u8; 16]) // idiag_ino, src_port, dst_port, extra: all zero for a dump
+        .collect();
     let mut msg = Vec::with_capacity(REQUEST_LEN);
     // `nlmsg_len` is `__u32`: encoding `REQUEST_LEN` (a `usize`) directly writes
     // eight bytes on x86_64 and the kernel answers `EINVAL` — the golden test
@@ -75,7 +70,9 @@ pub fn parse_entry(body: &[u8]) -> Option<DiagEntry> {
         return None;
     }
     let u32_at = |o: usize| -> Option<u32> {
-        <[u8; 4]>::try_from(&body[o..o + 4]).map(u32::from_le_bytes).ok()
+        <[u8; 4]>::try_from(&body[o..o + 4])
+            .map(u32::from_le_bytes)
+            .ok()
     };
     Some(DiagEntry {
         family: body[0],
@@ -129,7 +126,13 @@ pub const STATE_LISTEN: u8 = 10;
 /// Ask the kernel for every vsock socket in these states.
 pub fn census(states: u32) -> Result<Vec<DiagEntry>, DiagError> {
     // SAFETY: socket(2) with constants; no pointers.
-    let fd = unsafe { libc::socket(libc::AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, uapi::NETLINK_SOCK_DIAG) };
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_NETLINK,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            uapi::NETLINK_SOCK_DIAG,
+        )
+    };
     if fd < 0 {
         return Err(DiagError::Netlink(errno()));
     }
@@ -152,14 +155,7 @@ pub fn census(states: u32) -> Result<Vec<DiagEntry>, DiagError> {
     }
     let req = build_request(states, 1);
     // SAFETY: `req` outlives the call and its length is exact.
-    let sent = unsafe {
-        libc::send(
-            fd,
-            req.as_ptr() as *const libc::c_void,
-            req.len(),
-            0,
-        )
-    };
+    let sent = unsafe { libc::send(fd, req.as_ptr() as *const libc::c_void, req.len(), 0) };
     if sent < 0 {
         let e = errno();
         unsafe { libc::close(fd) };
@@ -171,14 +167,7 @@ pub fn census(states: u32) -> Result<Vec<DiagEntry>, DiagError> {
     let mut done = false;
     while !done {
         // SAFETY: writing into `buf`'s own capacity.
-        let n = unsafe {
-            libc::recv(
-                fd,
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len(),
-                0,
-            )
-        };
+        let n = unsafe { libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
         if n < 0 {
             let e = errno();
             unsafe { libc::close(fd) };
@@ -246,8 +235,7 @@ pub fn parse_messages(data: &[u8]) -> (Vec<DiagEntry>, bool, Option<i32>) {
 /// user without root, or already gone) simply do not appear, and the caller
 /// prints `pid: None` for them.
 pub fn attribute_pids(entries: &[DiagEntry]) -> BTreeMap<u64, (u32, String)> {
-    let wanted: std::collections::BTreeSet<u64> =
-        entries.iter().map(|e| e.ino as u64).collect();
+    let wanted: std::collections::BTreeSet<u64> = entries.iter().map(|e| e.ino as u64).collect();
     let mut map = BTreeMap::new();
     let Ok(procs) = std::fs::read_dir("/proc") else {
         return map;
@@ -311,7 +299,11 @@ mod tests {
         assert_eq!(&m[4..6], &20u16.to_le_bytes(), "SOCK_DIAG_BY_FAMILY");
         assert_eq!(&m[6..8], &0x0301u16.to_le_bytes(), "ROOT|MATCH|REQUEST");
         assert_eq!(&m[8..12], &1u32.to_le_bytes());
-        assert_eq!(&m[12..16], &0u32.to_le_bytes(), "pid 0 lets the kernel fill it");
+        assert_eq!(
+            &m[12..16],
+            &0u32.to_le_bytes(),
+            "pid 0 lets the kernel fill it"
+        );
         assert_eq!(m[16], 40, "AF_VSOCK");
         assert_eq!(&m[17..20], &[0, 0, 0]);
         assert_eq!(&m[20..24], &0xfff_u32.to_le_bytes());
@@ -345,7 +337,10 @@ mod tests {
 
         let e = parse_entry(&bytes(CONNECTOR)).expect("connector parses");
         assert_eq!((e.state, e.ino), (1, 129324086));
-        assert_eq!(e.src_port, 3064402457, "ephemeral u32 port: a u16 would read 4665");
+        assert_eq!(
+            e.src_port, 3064402457,
+            "ephemeral u32 port: a u16 would read 4665"
+        );
         assert_eq!((e.dst_cid, e.dst_port), (2, 40111));
 
         let e = parse_entry(&bytes(ACCEPTED)).expect("accepted parses");
@@ -396,7 +391,10 @@ mod tests {
         let fd = match listen_fixture(port) {
             Ok(fd) => fd,
             Err(e) => {
-                eprintln!("skipping: cannot create a vsock listener here ({})", uapi::errno_label(e));
+                eprintln!(
+                    "skipping: cannot create a vsock listener here ({})",
+                    uapi::errno_label(e)
+                );
                 return;
             }
         };
@@ -423,7 +421,11 @@ mod tests {
     fn listen_fixture(port: u32) -> Result<libc::c_int, i32> {
         // SAFETY: constants only.
         let fd = unsafe {
-            libc::socket(uapi::AF_VSOCK as libc::c_int, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0)
+            libc::socket(
+                uapi::AF_VSOCK as libc::c_int,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+                0,
+            )
         };
         if fd < 0 {
             return Err(errno());
@@ -453,4 +455,3 @@ mod tests {
         }
     }
 }
-

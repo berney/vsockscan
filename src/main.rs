@@ -1,7 +1,9 @@
 //! vsockscan — guest-side AF_VSOCK recon.
 //!
 //! Exit codes (spec §4): `0` clean run, `1` usage error, `2` runtime error,
-//! `3` selftest assertion failure.
+//! `3` selftest assertion failure. SIGINT additionally prints the report for
+//! whatever completed and exits `130`: a wide sweep is minutes of connects and
+//! the default disposition would throw all of them away.
 
 mod caps;
 mod diag;
@@ -26,6 +28,34 @@ use render::style;
 /// Outcome of anything this binary can be asked to do, mapped onto the exit codes
 /// documented above.
 pub type RunResult<T> = Result<T, RuntimeError>;
+
+/// Ctrl-C is an expected way to end a long sweep, not a reason to lose it.
+///
+/// A 500 000-port sweep is minutes of connects; with the default disposition the
+/// process dies and the report - the entire point of those connects - is never
+/// printed. So SIGINT only raises a flag: the scan pool stops claiming work, the
+/// accept loop returns, the report is rendered from whatever completed, and the
+/// exit status says 130 (128 + SIGINT), which is what a shell expects to see.
+pub static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_sigint(_sig: libc::c_int) {
+    // Async-signal-safe: a relaxed store to a static bool is all this may do.
+    INTERRUPTED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// True once Ctrl-C has been seen. Sweep loops check it between units of work.
+pub fn interrupted() -> bool {
+    INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn install_sigint_handler() {
+    // The function item goes through a pointer first: casting it straight to an
+    // integer is what clippy objects to, and the pointer is the honest form of
+    // "this is an address the kernel will call".
+    let handler = on_sigint as *const () as libc::sighandler_t;
+    // SAFETY: a handler that only stores to a static; SIGINT has no other use here.
+    unsafe { libc::signal(libc::SIGINT, handler) };
+}
 
 #[derive(Debug)]
 pub struct RuntimeError {
@@ -276,13 +306,20 @@ fn main() -> ExitCode {
         eprintln!("\nvsockscan: a subcommand is required (probe | scan | listen | selftest)");
         return ExitCode::from(1);
     };
+    // Only the commands that can run for a long time need this, and installing it
+    // for all of them is cheaper than explaining why one forgot.
+    install_sigint_handler();
     let res: RunResult<()> = match command {
         Command::Probe(a) => run_probe(&cli, a),
         Command::Scan(a) => run_scan(&cli, a),
         Command::Listen(a) => run_listen(&cli, a),
         Command::Selftest => run_selftest(&cli),
     };
-    res.map_or_else(From::from, |_| ExitCode::SUCCESS)
+    match res {
+        Ok(()) if interrupted() => ExitCode::from(130),
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => e.into(),
+    }
 }
 
 /// One place decides colour, format and destination, so `-o FILE` is

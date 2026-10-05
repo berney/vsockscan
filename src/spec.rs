@@ -90,9 +90,7 @@ impl CidSpec {
                         let a = parse_u32(a, "--cid range start")?;
                         let b = parse_u32(b, "--cid range end")?;
                         if a > b {
-                            return Err(format!(
-                                "--cid range {a}-{b} runs backwards"
-                            ));
+                            return Err(format!("--cid range {a}-{b} runs backwards"));
                         }
                         CidToken::Range(a, b)
                     } else {
@@ -237,7 +235,12 @@ mod tests {
     use super::*;
 
     fn ctx<'a>(max_cids: usize, wide_ok: bool, extra: &'a [u32]) -> CidContext<'a> {
-        CidContext { max_cids, wide_ok, extra, local: Some(3) }
+        CidContext {
+            max_cids,
+            wide_ok,
+            extra,
+            local: Some(3),
+        }
     }
 
     #[test]
@@ -248,7 +251,9 @@ mod tests {
         v.dedup();
         assert_eq!(v.len(), 64, "the curated set must not contain duplicates");
         // The ports the design names must survive any edit of the list.
-        for p in [22u32, 80, 443, 1024, 1026, 2375, 2376, 4243, 8080, 10809, 50051, 56794] {
+        for p in [
+            22u32, 80, 443, 1024, 1026, 2375, 2376, 4243, 8080, 10809, 50051, 56794,
+        ] {
             assert!(TOP_PORTS.contains(&p), "curated set lost {p}");
         }
     }
@@ -273,9 +278,15 @@ mod tests {
         let s = CidSpec::parse("host").unwrap();
         let r = s.resolve(&ctx(256, false, &[])).unwrap();
         assert_eq!(r.cids, vec![2]);
-        let r = CidSpec::parse("hyp,local,any").unwrap().resolve(&ctx(256, false, &[])).unwrap();
+        let r = CidSpec::parse("hyp,local,any")
+            .unwrap()
+            .resolve(&ctx(256, false, &[]))
+            .unwrap();
         assert_eq!(r.cids, vec![0, 3, u32::MAX]);
-        let r = CidSpec::parse("3-6").unwrap().resolve(&ctx(256, false, &[])).unwrap();
+        let r = CidSpec::parse("3-6")
+            .unwrap()
+            .resolve(&ctx(256, false, &[]))
+            .unwrap();
         assert_eq!(r.cids, vec![3, 4, 5, 6]);
         // Ranges over the u32 tail must not overflow.
         let r = CidSpec::parse("4294967294-4294967295")
@@ -289,7 +300,12 @@ mod tests {
     fn local_needs_a_resolved_cid() {
         let s = CidSpec::parse("local").unwrap();
         let e = s
-            .resolve(&CidContext { max_cids: 256, wide_ok: false, extra: &[], local: None })
+            .resolve(&CidContext {
+                max_cids: 256,
+                wide_ok: false,
+                extra: &[],
+                local: None,
+            })
             .unwrap_err();
         assert!(e.contains("could not be resolved"), "{e}");
     }
@@ -298,7 +314,11 @@ mod tests {
     fn all_is_gated_to_the_curated_set_by_default() {
         let s = CidSpec::parse("all").unwrap();
         let r = s.resolve(&ctx(256, false, &[7, 2])).unwrap();
-        assert_eq!(r.cids, vec![0, 1, 2, 7], "curated = hyp/local/host + diag CIDs");
+        assert_eq!(
+            r.cids,
+            vec![0, 1, 2, 7],
+            "curated = hyp/local/host + diag CIDs"
+        );
         assert!(r.notes[0].contains("narrowed"));
         assert!(r.notes[0].contains("--i-know-this-is-wide"));
     }

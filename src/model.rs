@@ -12,9 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Output format. Also the CLI's `--format` values: the kebab-case rename gives
 /// exactly `text|markdown|json|yaml`, so there is no second enum to keep in step
 /// between the parser and the renderers.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum Format {
     Text,
@@ -464,6 +462,13 @@ impl Report {
                 .or_default()
                 .push(r.outcome.kind.as_str());
         }
+        // A group with fewer than two rows means the comparison was never made for
+        // that endpoint - an interrupted sweep does exactly this - and `all()` over
+        // a single row is vacuously true, which would print `flags-agree=yes` about
+        // a run that compared nothing. Only a complete pairing gets an answer.
+        if pairs.values().any(|v| v.len() < 2) {
+            return None;
+        }
         Some(pairs.values().all(|v| v.windows(2).all(|w| w[0] == w[1])))
     }
 }
@@ -552,6 +557,40 @@ mod tests {
     }
 
     #[test]
+    fn an_unpaired_endpoint_is_not_agreement() {
+        // `--flags both` interrupted mid-sweep leaves some endpoints with one row.
+        // Vacuous agreement would print `flags-agree=yes` about a comparison that
+        // never happened.
+        let mut r = Report::new("scan", placeholder_header());
+        r.rows.push(ScanRow {
+            cid: 3,
+            port: 1,
+            flags: FlagSet::None,
+            outcome: Outcome::new(OutcomeKind::Open),
+            elapsed_ms: 0,
+            banner: None,
+        });
+        r.rows.push(ScanRow {
+            cid: 3,
+            port: 2,
+            flags: FlagSet::None,
+            outcome: Outcome::new(OutcomeKind::Open),
+            elapsed_ms: 0,
+            banner: None,
+        });
+        r.rows.push(ScanRow {
+            cid: 3,
+            port: 2,
+            flags: FlagSet::ToHost,
+            outcome: Outcome::new(OutcomeKind::Open),
+            elapsed_ms: 0,
+            banner: None,
+        });
+        r.recompute_summary(0);
+        assert_eq!(r.summary.flags_agree, None);
+    }
+
+    #[test]
     fn flags_agree_true_when_both_settings_classify_identically() {
         let mut r = Report::new("scan", placeholder_header());
         for flags in [FlagSet::None, FlagSet::ToHost] {
@@ -589,7 +628,10 @@ mod tests {
             serde_json::to_string(&SysctlValue::Present("1".into())).unwrap(),
             "\"1\""
         );
-        assert_eq!(serde_json::to_string(&SysctlValue::Absent).unwrap(), "\"absent\"");
+        assert_eq!(
+            serde_json::to_string(&SysctlValue::Absent).unwrap(),
+            "\"absent\""
+        );
         assert_eq!(
             serde_json::from_str::<SysctlValue>("\"absent\"").unwrap(),
             SysctlValue::Absent

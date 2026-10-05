@@ -11,11 +11,10 @@
 //!   device tells (the header already holds them) because `ENODEV` means both
 //!   "no driver" and "driver present, no device bound" (§3.2).
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::model::{
-    DiagEntry, Finding, FlagSet, Outcome, OutcomeKind, Report, ScanRow, Severity,
-    TellState,
+    DiagEntry, Finding, FlagSet, Outcome, OutcomeKind, Report, ScanRow, Severity, TellState,
 };
 use crate::probe::{self, Connect};
 use crate::uapi;
@@ -78,9 +77,7 @@ pub fn classify(res: &Connect) -> Outcome {
                     OutcomeKind::Closed
                 }
                 // EWOULDBLOCK is EAGAIN on Linux; naming both would be an unreachable arm.
-                libc::ETIMEDOUT | libc::EAGAIN | libc::EALREADY => {
-                    OutcomeKind::Silent
-                }
+                libc::ETIMEDOUT | libc::EAGAIN | libc::EALREADY => OutcomeKind::Silent,
                 _ => OutcomeKind::Error,
             };
             let o = Outcome::new(kind).with_errno(*errno);
@@ -121,7 +118,10 @@ pub fn apply_canary(outcome: Outcome, cid: u32, canary: TellState) -> Outcome {
 }
 
 fn monotonic_us() -> u64 {
-    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     // SAFETY: clock_gettime writes through a valid pointer to a timespec we own.
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
     ts.tv_sec as u64 * 1_000_000 + ts.tv_nsec as u64 / 1000
@@ -180,7 +180,11 @@ fn vsock_stream() -> Result<libc::c_int, i32> {
 
 /// Wait briefly for bytes, then read what is there without blocking further.
 fn read_preview(fd: libc::c_int, want: usize) -> Option<String> {
-    let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    let mut p = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
     // SAFETY: poll on a descriptor we own.
     if unsafe { libc::poll(&mut p, 1, 100) } != 1 {
         return None;
@@ -205,7 +209,16 @@ fn read_preview(fd: libc::c_int, want: usize) -> Option<String> {
 
 /// The pool. `std::thread`, no async runtime: the kernel path is cheap and we
 /// would rather bound descriptors than maximise syscalls per second.
-pub fn sweep(job_list: &[Job], parallel: usize, timeout_ms: i32, banner: usize) -> Vec<ScanRow> {
+/// Run the pool. Returns `(completed rows, jobs planned)`: a Ctrl-C stops the
+/// workers between jobs, so the caller must expect fewer rows than it asked for
+/// and say so in the report rather than pretend the grid is whole.
+pub fn sweep(
+    job_list: &[Job],
+    parallel: usize,
+    timeout_ms: i32,
+    banner: usize,
+    stop: &AtomicBool,
+) -> (Vec<ScanRow>, usize) {
     // Work is claimed with an atomic counter and each worker *returns* its
     // `(index, row)` pairs, so there is no lock to poison or unwrap; ordering is
     // restored by assembling from the indices.
@@ -218,6 +231,9 @@ pub fn sweep(job_list: &[Job], parallel: usize, timeout_ms: i32, banner: usize) 
                 s.spawn(|| {
                     let mut local = Vec::new();
                     loop {
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         if i >= job_list.len() {
                             break;
@@ -244,10 +260,10 @@ pub fn sweep(job_list: &[Job], parallel: usize, timeout_ms: i32, banner: usize) 
             slots[i] = Some(row);
         }
     }
-    slots
-        .into_iter()
-        .map(|r| r.expect("every job index is filled by a worker"))
-        .collect()
+    // Job order is kept so a transcript is comparable between runs; the holes left
+    // by an interrupt are dropped, and the caller reports how many there were.
+    let rows = slots.into_iter().flatten().collect::<Vec<_>>();
+    (rows, job_list.len())
 }
 
 pub struct Opts<'a> {
@@ -284,6 +300,7 @@ pub fn stage1_ports(ports: &[u32], n: usize) -> Vec<u32> {
 /// §6.3 classification (header, tells, posture) so every row is reported next to
 /// the device evidence that qualifies it.
 pub fn run(o: &Opts, report: &mut Report) -> Result<(), String> {
+    let stop = &crate::INTERRUPTED;
     let canary = report
         .tells
         .iter()
@@ -304,7 +321,7 @@ pub fn run(o: &Opts, report: &mut Report) -> Result<(), String> {
     if o.ports.len() > o.stage1_ports && o.cids.len() > 1 {
         let s1 = stage1_ports(o.ports, o.stage1_ports);
         let stage_jobs = jobs(o.cids, &s1, o.flags);
-        let early = sweep(&stage_jobs, o.parallel, o.timeout_ms, 0);
+        let (early, _) = sweep(&stage_jobs, o.parallel, o.timeout_ms, 0, stop);
         for &cid in o.cids {
             let mine: Vec<&ScanRow> = early.iter().filter(|r| r.cid == cid).collect();
             if !mine.is_empty()
@@ -323,7 +340,9 @@ pub fn run(o: &Opts, report: &mut Report) -> Result<(), String> {
         .filter(|j| !pruned.contains(&j.cid))
         .collect();
     let start = monotonic_us();
-    let mut rows = sweep(&kept_jobs, o.parallel, o.timeout_ms, o.banner);
+    let (mut rows, planned) = sweep(&kept_jobs, o.parallel, o.timeout_ms, o.banner, stop);
+    let dropped = planned.saturating_sub(rows.len());
+    let issued = planned - dropped;
     rows.extend(pruned_rows);
     let mut rows = keep_order_rows(&all, rows);
     for r in rows.iter_mut() {
@@ -356,8 +375,24 @@ pub fn run(o: &Opts, report: &mut Report) -> Result<(), String> {
                 .to_string(),
         );
     }
+    if dropped > 0 {
+        // An interrupted sweep is a partial answer and must read that way: the row
+        // count, the note and the suppressed flag comparison all say the same thing.
+        notes.push(format!(
+            "interrupted after {issued} of {planned} planned connects: {dropped} were never \
+             issued, so this is a partial sweep and the endpoints it never reached are unknown, \
+             not closed. `flags-agree` is suppressed because the two flag sets are no longer \
+             paired everywhere."
+        ));
+        report.findings.push(crate::model::Finding {
+            severity: crate::model::Severity::Warn,
+            message: format!("sweep interrupted: {dropped} of {planned} connects did not run"),
+        });
+    }
     report.rows = rows;
-    report.findings.extend(flag_disagreements(o.flags, &report.rows));
+    report
+        .findings
+        .extend(flag_disagreements(o.flags, &report.rows));
     cross_check_diag(report);
     // The model owns the counting so the summary can never disagree with the rows.
     report.recompute_summary(u128::from(elapsed_ms));
@@ -367,13 +402,17 @@ pub fn run(o: &Opts, report: &mut Report) -> Result<(), String> {
 
 /// `(cid, port, outcome-none, outcome-to-host)` for every pair present.
 fn pairs(rows: &[ScanRow]) -> Vec<(u32, u32, OutcomeKind, OutcomeKind)> {
+    // Same story as `keep_order_rows`: pairing by searching the row list per row
+    // is quadratic, and this runs on every `--flags both` sweep.
+    let mut to_host: std::collections::HashMap<(u32, u32), OutcomeKind> =
+        std::collections::HashMap::new();
+    for o in rows.iter().filter(|r| r.flags == FlagSet::ToHost) {
+        to_host.insert((o.cid, o.port), o.outcome.kind);
+    }
     let mut out = Vec::new();
     for r in rows.iter().filter(|r| r.flags == FlagSet::None) {
-        if let Some(other) = rows
-            .iter()
-            .find(|o| o.flags == FlagSet::ToHost && o.cid == r.cid && o.port == r.port)
-        {
-            out.push((r.cid, r.port, r.outcome.kind, other.outcome.kind));
+        if let Some(kind) = to_host.get(&(r.cid, r.port)) {
+            out.push((r.cid, r.port, r.outcome.kind, *kind));
         }
     }
     out
@@ -416,13 +455,22 @@ fn reached(row: &ScanRow) -> bool {
 /// run and an unpruned one put the same `(cid, port, flag)` on the same line
 /// number of the output.
 fn keep_order_rows(all: &[Job], mut rows: Vec<ScanRow>) -> Vec<ScanRow> {
-    let rank = |r: &ScanRow| {
-        all.iter()
-            .position(|j| j.cid == r.cid && j.port == r.port && j.flags == r.flags)
-    };
+    // A `position()` per row is quadratic: measured on a 500 000-job sweep, the
+    // connects took about 2 s and this ordering took the other ~115 s of the run.
+    // One pass to index the job list makes it linear, and a wide sweep is the
+    // case this tool exists for.
+    let mut rank: std::collections::HashMap<(u32, u32, crate::model::FlagSet), usize> =
+        std::collections::HashMap::with_capacity(all.len());
+    for (i, j) in all.iter().enumerate() {
+        rank.insert((j.cid, j.port, j.flags), i);
+    }
     // Nothing outside the job list should exist; if it does, it sorts last
     // rather than panicking over a bookkeeping slip mid-sweep.
-    rows.sort_by_key(|r| rank(r).unwrap_or(usize::MAX));
+    rows.sort_by_key(|r| {
+        rank.get(&(r.cid, r.port, r.flags))
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
     rows
 }
 
@@ -449,7 +497,8 @@ pub fn cross_check_diag(report: &mut Report) {
     for r in &report.rows {
         match (listen(r.cid, r.port), r.outcome.kind) {
             (Some(e), k) if !reached(r) => {
-                let message = format!(
+                let message =
+                    format!(
                     "a listener is bound at CID {} port {} (ino {}, pid {}) but connecting to it \
                      reported {} — a full backlog, a transport that does not route to it, or a \
                      namespace the census sees and the connect does not",
@@ -461,7 +510,10 @@ pub fn cross_check_diag(report: &mut Report) {
                 );
                 // `--flags both` probes one port twice: one fact, one finding.
                 if !already_reported(&report.findings, &message) {
-                    report.findings.push(Finding { severity: Severity::Warn, message });
+                    report.findings.push(Finding {
+                        severity: Severity::Warn,
+                        message,
+                    });
                 }
             }
             (None, _) if reached(r) => {
@@ -471,7 +523,10 @@ pub fn cross_check_diag(report: &mut Report) {
                     r.cid, r.port
                 );
                 if !already_reported(&report.findings, &message) {
-                    report.findings.push(Finding { severity: Severity::Warn, message });
+                    report.findings.push(Finding {
+                        severity: Severity::Warn,
+                        message,
+                    });
                 }
             }
             _ => {}
@@ -482,6 +537,46 @@ pub fn cross_check_diag(report: &mut Report) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stopped_pool_returns_what_completed_and_says_so() {
+        // Ctrl-C must degrade to a partial answer with an honest count, never to a
+        // panic over the holes or a full-size claim.
+        let stop = AtomicBool::new(true);
+        let jobs = jobs(&[3], &[1, 2, 3, 4, 5], FlagMode::None);
+        let (rows, planned) = sweep(&jobs, 4, 50, 0, &stop);
+        assert_eq!(planned, 5);
+        assert!(
+            rows.is_empty(),
+            "a stopped pool issued {} connects",
+            rows.len()
+        );
+    }
+
+    #[test]
+    fn ordering_a_partial_sweep_keeps_job_order() {
+        let all = jobs(&[3, 4], &[80, 443], FlagMode::None);
+        let row = |cid: u32, port: u32| ScanRow {
+            cid,
+            port,
+            flags: FlagSet::None,
+            outcome: Outcome::new(OutcomeKind::Closed),
+            elapsed_ms: 0,
+            banner: None,
+        };
+        let mut partial = all
+            .iter()
+            .map(|j| row(j.cid, j.port))
+            .collect::<Vec<ScanRow>>();
+        partial.retain(|r| !(r.cid == 3 && r.port == 80));
+        let ordered = keep_order_rows(&all, partial);
+        assert_eq!(ordered.len(), 3);
+        assert_eq!(
+            ordered.iter().map(|r| (r.cid, r.port)).collect::<Vec<_>>(),
+            vec![(3, 443), (4, 80), (4, 443)],
+            "holes must not reshuffle the remaining rows"
+        );
+    }
 
     fn row(cid: u32, port: u32, flags: FlagSet, kind: OutcomeKind) -> ScanRow {
         ScanRow {
@@ -497,10 +592,8 @@ mod tests {
     #[test]
     fn job_order_is_cid_major_then_port_then_flag() {
         let j = jobs(&[2, 3], &[80, 22], FlagMode::Both);
-        let got: Vec<(u32, u32, &str)> = j
-            .iter()
-            .map(|x| (x.cid, x.port, x.flags.label()))
-            .collect();
+        let got: Vec<(u32, u32, &str)> =
+            j.iter().map(|x| (x.cid, x.port, x.flags.label())).collect();
         assert_eq!(
             got,
             vec![
@@ -526,42 +619,66 @@ mod tests {
         let cases: Vec<(Connect, OutcomeKind, &str)> = vec![
             (Connect::Established, OutcomeKind::Open, "connect completed"),
             (
-                Connect::Failed { errno: libc::ENODEV, stage: "connect" },
+                Connect::Failed {
+                    errno: libc::ENODEV,
+                    stage: "connect",
+                },
                 OutcomeKind::RefusedKernel,
                 "no transport, or transport with no device",
             ),
             (
-                Connect::Failed { errno: libc::EINVAL, stage: "connect" },
+                Connect::Failed {
+                    errno: libc::EINVAL,
+                    stage: "connect",
+                },
                 OutcomeKind::RefusedKernel,
                 "address the kernel will not route",
             ),
             (
-                Connect::Failed { errno: libc::EADDRNOTAVAIL, stage: "connect" },
+                Connect::Failed {
+                    errno: libc::EADDRNOTAVAIL,
+                    stage: "connect",
+                },
                 OutcomeKind::RefusedKernel,
                 "no route to that CID",
             ),
             (
-                Connect::Failed { errno: libc::ECONNRESET, stage: "SO_ERROR" },
+                Connect::Failed {
+                    errno: libc::ECONNRESET,
+                    stage: "SO_ERROR",
+                },
                 OutcomeKind::Closed,
                 "muxer RST for a port with no host listener",
             ),
             (
-                Connect::Failed { errno: libc::ECONNREFUSED, stage: "SO_ERROR" },
+                Connect::Failed {
+                    errno: libc::ECONNREFUSED,
+                    stage: "SO_ERROR",
+                },
                 OutcomeKind::Closed,
                 "RST from a transport with no peer",
             ),
             (
-                Connect::Failed { errno: libc::ESOCKTNOSUPPORT, stage: "connect" },
+                Connect::Failed {
+                    errno: libc::ESOCKTNOSUPPORT,
+                    stage: "connect",
+                },
                 OutcomeKind::Unsupported,
                 "no seqpacket path here",
             ),
             (
-                Connect::Failed { errno: libc::EAFNOSUPPORT, stage: "connect" },
+                Connect::Failed {
+                    errno: libc::EAFNOSUPPORT,
+                    stage: "connect",
+                },
                 OutcomeKind::Unsupported,
                 "no AF_VSOCK at all",
             ),
             (
-                Connect::Failed { errno: libc::ETIMEDOUT, stage: "SO_ERROR" },
+                Connect::Failed {
+                    errno: libc::ETIMEDOUT,
+                    stage: "SO_ERROR",
+                },
                 OutcomeKind::Silent,
                 "frame left, nothing answered",
             ),
@@ -571,14 +688,21 @@ mod tests {
                 "unrouted dst_cid drop",
             ),
             (
-                Connect::Failed { errno: libc::EACCES, stage: "connect" },
+                Connect::Failed {
+                    errno: libc::EACCES,
+                    stage: "connect",
+                },
                 OutcomeKind::Error,
                 "privileged port as non-root is not a reachability answer",
             ),
         ];
         for (res, want, why) in cases {
             let got = classify(&res);
-            assert_eq!(got.kind, want, "{why}: {res:?} classified as {:?}", got.kind);
+            assert_eq!(
+                got.kind, want,
+                "{why}: {res:?} classified as {:?}",
+                got.kind
+            );
             let arrived_somewhere_other_than_so_error =
                 matches!(&res, Connect::Failed { stage, .. } if *stage != "SO_ERROR");
             assert!(
@@ -590,22 +714,40 @@ mod tests {
 
     #[test]
     fn redirect_only_relabels_cid_2_and_keeps_the_errno() {
-        let closed = classify(&Connect::Failed { errno: libc::ECONNRESET, stage: "SO_ERROR" });
+        let closed = classify(&Connect::Failed {
+            errno: libc::ECONNRESET,
+            stage: "SO_ERROR",
+        });
         let r = apply_canary(closed.clone(), 2, TellState::Yes);
         assert_eq!(r.kind, OutcomeKind::LoopbackRedirect);
         assert_eq!(r.errno, Some(libc::ECONNRESET));
         assert!(r.detail.unwrap().contains("nothing about the host"));
         // Other CIDs, and a canary that never fired or could not fire, are untouched.
-        assert_eq!(apply_canary(closed.clone(), 3, TellState::Yes).kind, OutcomeKind::Closed);
-        assert_eq!(apply_canary(closed.clone(), 2, TellState::No).kind, OutcomeKind::Closed);
-        assert_eq!(apply_canary(closed.clone(), 2, TellState::Inert).kind, OutcomeKind::Closed);
+        assert_eq!(
+            apply_canary(closed.clone(), 3, TellState::Yes).kind,
+            OutcomeKind::Closed
+        );
+        assert_eq!(
+            apply_canary(closed.clone(), 2, TellState::No).kind,
+            OutcomeKind::Closed
+        );
+        assert_eq!(
+            apply_canary(closed.clone(), 2, TellState::Inert).kind,
+            OutcomeKind::Closed
+        );
         // A frame that never left the host cannot have been redirected.
-        let refused = classify(&Connect::Failed { errno: libc::ENODEV, stage: "connect" });
+        let refused = classify(&Connect::Failed {
+            errno: libc::ENODEV,
+            stage: "connect",
+        });
         assert_eq!(
             apply_canary(refused.clone(), 2, TellState::Yes).kind,
             OutcomeKind::RefusedKernel
         );
-        let unsupported = classify(&Connect::Failed { errno: libc::ESOCKTNOSUPPORT, stage: "connect" });
+        let unsupported = classify(&Connect::Failed {
+            errno: libc::ESOCKTNOSUPPORT,
+            stage: "connect",
+        });
         assert_eq!(
             apply_canary(unsupported, 2, TellState::Yes).kind,
             OutcomeKind::Unsupported
@@ -616,14 +758,21 @@ mod tests {
     fn sweep_output_is_in_job_order_whatever_completes_first() {
         // Loopback on the host: every port answers, the pool is wider than the
         // job list, and completion order is whatever the scheduler feels like.
-        let j = jobs(&[2], &[47001, 47002, 47003, 47004, 47005, 47006], FlagMode::None);
-        let rows = sweep(&j, 8, 200, 0);
+        let j = jobs(
+            &[2],
+            &[47001, 47002, 47003, 47004, 47005, 47006],
+            FlagMode::None,
+        );
+        let (rows, planned) = sweep(&j, 8, 200, 0, &AtomicBool::new(false));
+        assert_eq!(planned, j.len());
         assert_eq!(rows.len(), 6);
         let ports: Vec<u32> = rows.iter().map(|r| r.port).collect();
         assert_eq!(ports, vec![47001, 47002, 47003, 47004, 47005, 47006]);
         assert!(
-            rows.iter()
-                .all(|r| matches!(r.outcome.kind, OutcomeKind::Closed | OutcomeKind::RefusedKernel)),
+            rows.iter().all(|r| matches!(
+                r.outcome.kind,
+                OutcomeKind::Closed | OutcomeKind::RefusedKernel
+            )),
             "unlisted loopback ports must refuse, not look open: {:?}",
             rows.iter().map(|r| r.outcome.kind).collect::<Vec<_>>()
         );
@@ -675,7 +824,11 @@ mod tests {
         let mut report = Report::new("scan", crate::model::placeholder_header());
         report.rows = rows;
         report.recompute_summary(0);
-        assert_eq!(report.summary.flags_agree, Some(false), "the model must see the disagreement");
+        assert_eq!(
+            report.summary.flags_agree,
+            Some(false),
+            "the model must see the disagreement"
+        );
         let f = flag_disagreements(FlagMode::Both, &report.rows);
         assert_eq!(f.len(), 1, "only the port that differs is reported");
         assert!(f[0].message.contains("port 80"));
@@ -700,17 +853,32 @@ mod tests {
         };
         let mut report = Report::new("scan", crate::model::placeholder_header());
         report.diag_entries.push(entry);
-        report.rows.push(row(3, 10809, FlagSet::None, OutcomeKind::Silent));
-        report.rows.push(row(3, 1234, FlagSet::None, OutcomeKind::Open));
+        report
+            .rows
+            .push(row(3, 10809, FlagSet::None, OutcomeKind::Silent));
+        report
+            .rows
+            .push(row(3, 1234, FlagSet::None, OutcomeKind::Open));
         // `--flags both` probes one port twice: the same fact must not appear twice.
-        report.rows.push(row(3, 10809, FlagSet::ToHost, OutcomeKind::Silent));
+        report
+            .rows
+            .push(row(3, 10809, FlagSet::ToHost, OutcomeKind::Silent));
         // A redirected *refusal* is not a connection: it must not invent a finding
         // about a port nothing is bound to.
         let mut refused = row(2, 9999, FlagSet::None, OutcomeKind::LoopbackRedirect);
         refused.outcome = refused.outcome.with_errno(libc::ECONNRESET);
         report.rows.push(refused);
         cross_check_diag(&mut report);
-        assert_eq!(report.findings.len(), 2, "{:?}", report.findings.iter().map(|f| &f.message).collect::<Vec<_>>());
+        assert_eq!(
+            report.findings.len(),
+            2,
+            "{:?}",
+            report
+                .findings
+                .iter()
+                .map(|f| &f.message)
+                .collect::<Vec<_>>()
+        );
         assert!(report.findings[0].message.contains("full backlog"));
         assert!(report.findings[0].message.contains("pid 999"));
         assert!(report.findings[1].message.contains("another namespace"));

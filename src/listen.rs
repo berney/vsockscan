@@ -295,7 +295,13 @@ fn accept_loop(o: &Opts, report: &mut Report) -> Result<(), String> {
     let mut taken = 0usize;
     let mut handles = Vec::new();
     let tick = 100i32;
+    let stop = &crate::INTERRUPTED;
+    let mut interrupted = false;
     while waited < deadline_ms && (o.max_conns == 0 || taken < o.max_conns) {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            interrupted = true;
+            break;
+        }
         let mut pfds: Vec<libc::pollfd> = listeners
             .iter()
             .map(|(_, fd)| libc::pollfd {
@@ -362,6 +368,14 @@ fn accept_loop(o: &Opts, report: &mut Report) -> Result<(), String> {
                 (local_port, peer.svm_cid, peer.svm_port, bytes, closed)
             }));
         }
+    }
+    if interrupted {
+        o.live
+            .line("interrupted: stopped accepting, reporting what was seen");
+        report.summary.notes.push(
+            "interrupted by SIGINT: the ports were released and the connections listed below              are the ones that had already arrived"
+                .to_string(),
+        );
     }
     let mut rows = Vec::new();
     for h in handles {

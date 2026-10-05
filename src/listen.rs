@@ -23,6 +23,83 @@ pub struct Opts<'a> {
     pub timeout_ms: i32,
     /// Bytes to preview from each connection, as a hexdump.
     pub preview: usize,
+    /// Stream each frame as it arrives (text format only).
+    pub live: Live,
+}
+
+/// Live progress for `listen`, printed the moment it happens.
+///
+/// A listener that prints nothing until its timeout expires looks exactly like a
+/// listener that bound nothing, so the accept loop narrates itself. It goes to
+/// stdout under a process-wide lock: two connections arriving together must not
+/// interleave their hexdump blocks. Machine formats pass `Live::off()` and get
+/// every fact in the document at the end instead.
+#[derive(Clone, Copy)]
+pub struct Live(pub bool);
+
+impl Live {
+    pub fn off() -> Self {
+        Self(false)
+    }
+
+    fn line(&self, text: &str) {
+        if !self.0 {
+            return;
+        }
+        use std::io::Write as _;
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let stdout = std::io::stdout();
+        let mut w = stdout.lock();
+        // A dead pipe must not end a listener that is holding ports for someone else.
+        let _ = writeln!(w, "{text}");
+        let _ = w.flush();
+    }
+}
+
+/// Wall clock as `HH:MM:SS.mmm`, so a live block can be lined up with a guest
+/// `dmesg` or a host capture. UTC-free on purpose: this is read by a human who is
+/// standing in front of one machine.
+fn clock() -> String {
+    let mut tv = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+    // SAFETY: gettimeofday writes through a pointer to a live struct.
+    if unsafe { libc::gettimeofday(&mut tv, std::ptr::null_mut()) } != 0 {
+        return "?".to_string();
+    }
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: localtime_r writes the struct we pass it.
+    if unsafe { libc::localtime_r(&tv.tv_sec, &mut tm) }.is_null() {
+        return "?".to_string();
+    }
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec,
+        tv.tv_usec / 1000
+    )
+}
+
+/// One streamed connection block: attribution first, then the bytes under it.
+fn conn_block(port: u32, cid: u32, peer_port: u32, bytes: &[u8], closed: bool, ts: &str) -> String {
+    let mut out = format!(
+        "{ts}  port {port}  peer CID {cid} port {peer_port}  {} byte(s)",
+        bytes.len()
+    );
+    if !closed {
+        out.push_str("  (read window ended, connection still open)");
+    }
+    if bytes.is_empty() {
+        out.push_str("\n  peer sent nothing before closing");
+    } else {
+        for line in hexdump(bytes).lines() {
+            out.push_str(&format!("\n  {line}"));
+        }
+    }
+    out
 }
 
 /// The result of one `bind(CID_ANY, port)`.
@@ -96,10 +173,9 @@ pub fn census_rows(ports: &[u32]) -> Vec<ProbeRow> {
             // explanation rides on the outcome, the same way the capability probes
             // do it, so both tables read as one shape.
             let (outcome, value) = match try_bind(port) {
-                Bind::Bound { ino } => (
-                    Outcome::new(OutcomeKind::Open),
-                    Some(format!("ino {ino}")),
-                ),
+                Bind::Bound { ino } => {
+                    (Outcome::new(OutcomeKind::Open), Some(format!("ino {ino}")))
+                }
                 Bind::Denied => (
                     Outcome::new(OutcomeKind::Error)
                         .with_errno(libc::EACCES)
@@ -121,10 +197,7 @@ pub fn census_rows(ports: &[u32]) -> Vec<ProbeRow> {
                         ),
                     None,
                 ),
-                Bind::Failed { errno: e } => (
-                    Outcome::new(OutcomeKind::Error).with_errno(e),
-                    None,
-                ),
+                Bind::Failed { errno: e } => (Outcome::new(OutcomeKind::Error).with_errno(e), None),
             };
             ProbeRow {
                 name: format!("bind:{}", port),
@@ -149,7 +222,13 @@ pub fn hexdump(data: &[u8]) -> String {
             .join(" ");
         let ascii: String = chunk
             .iter()
-            .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+            .map(|&b| {
+                if (0x20..0x7f).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
             .collect();
         out.push_str(&format!("{off:08x}  {bytes:<47}  |{ascii}|\n"));
     }
@@ -198,7 +277,7 @@ fn accept_loop(o: &Opts, report: &mut Report) -> Result<(), String> {
     if listeners.is_empty() {
         return Err("no port could be bound; nothing to listen on".to_string());
     }
-    report.summary.notes.push(format!(
+    let banner = format!(
         "listening on {} port(s) for up to {} ms{}",
         listeners.len(),
         o.timeout_ms,
@@ -207,7 +286,9 @@ fn accept_loop(o: &Opts, report: &mut Report) -> Result<(), String> {
         } else {
             format!(", stopping after {} connection(s)", o.max_conns)
         }
-    ));
+    );
+    report.summary.notes.push(banner.clone());
+    o.live.line(&banner);
 
     let deadline_ms = o.timeout_ms.max(0);
     let mut waited = 0i32;
@@ -217,10 +298,18 @@ fn accept_loop(o: &Opts, report: &mut Report) -> Result<(), String> {
     while waited < deadline_ms && (o.max_conns == 0 || taken < o.max_conns) {
         let mut pfds: Vec<libc::pollfd> = listeners
             .iter()
-            .map(|(_, fd)| libc::pollfd { fd: *fd, events: libc::POLLIN, revents: 0 })
+            .map(|(_, fd)| libc::pollfd {
+                fd: *fd,
+                events: libc::POLLIN,
+                revents: 0,
+            })
             .collect();
         let slice = deadline_ms - waited;
-        let slice = if o.max_conns == 0 { slice.min(tick) } else { tick };
+        let slice = if o.max_conns == 0 {
+            slice.min(tick)
+        } else {
+            tick
+        };
         // SAFETY: poll over descriptors we own, length passed explicitly.
         let pr = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, slice) };
         waited += slice;
@@ -244,15 +333,30 @@ fn accept_loop(o: &Opts, report: &mut Report) -> Result<(), String> {
             if fd < 0 {
                 report.finding(
                     Severity::Warn,
-                    format!("accept on port {port} failed: {}", uapi::errno_label(errno())),
+                    format!(
+                        "accept on port {port} failed: {}",
+                        uapi::errno_label(errno())
+                    ),
                 );
                 continue;
             }
             taken += 1;
             let want = o.preview;
             let local_port = *port;
+            let live = o.live;
             handles.push(std::thread::spawn(move || {
                 let (bytes, closed) = drain(fd, want);
+                // The block is printed as soon as this connection's read window
+                // closes, not when the whole loop finishes: waiting for the
+                // deadline to find out that anyone called would be useless.
+                live.line(&conn_block(
+                    local_port,
+                    peer.svm_cid,
+                    peer.svm_port,
+                    &bytes,
+                    closed,
+                    &clock(),
+                ));
                 // SAFETY: closing the accepted descriptor.
                 unsafe { libc::close(fd) };
                 (local_port, peer.svm_cid, peer.svm_port, bytes, closed)
@@ -283,7 +387,10 @@ fn accept_loop(o: &Opts, report: &mut Report) -> Result<(), String> {
             flags: crate::model::FlagSet::None,
         });
         if !dump.is_empty() && dump != "\n" {
-            report.summary.notes.push(format!("first bytes from {port}:\n{dump}"));
+            report
+                .summary
+                .notes
+                .push(format!("first bytes from {port}:\n{dump}"));
         }
     }
     report.summary.results = report.probes.len() - base;
@@ -305,7 +412,11 @@ fn drain(fd: libc::c_int, want: usize) -> (Vec<u8>, bool) {
     let mut got = 0usize;
     let mut waited = 0i32;
     while got < want && waited < 1000 {
-        let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        let mut p = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
         // SAFETY: poll on a descriptor we own.
         let pr = unsafe { libc::poll(&mut p, 1, 100) };
         waited += 100;
@@ -313,13 +424,7 @@ fn drain(fd: libc::c_int, want: usize) -> (Vec<u8>, bool) {
             return (buf[..got].to_vec(), false);
         }
         // SAFETY: read into `buf[..want-got]` with the matching length.
-        let n = unsafe {
-            libc::read(
-                fd,
-                buf[got..].as_mut_ptr().cast(),
-                want - got,
-            )
-        };
+        let n = unsafe { libc::read(fd, buf[got..].as_mut_ptr().cast(), want - got) };
         if n == 0 {
             return (buf[..got].to_vec(), true);
         }
@@ -386,16 +491,14 @@ mod tests {
         let full = "76 73 6f 63 6b 20 70 72 6f 62 65 20 30 31 32 33";
         let tail = "34 35 36 37 38 39";
         assert_eq!(full.len(), 47);
-        assert_eq!(
-            lines[0],
-            format!("00000000  {full}  |vsock probe 0123|")
-        );
-        assert_eq!(
-            lines[1],
-            format!("00000010  {:<47}  |456789|", tail)
-        );
+        assert_eq!(lines[0], format!("00000000  {full}  |vsock probe 0123|"));
+        assert_eq!(lines[1], format!("00000010  {:<47}  |456789|", tail));
         // Non-printable bytes become dots, and the empty input is the empty string.
-        assert!(hexdump(&[0, 1, 0x7f]).lines().next().unwrap().ends_with("|...|"));
+        assert!(hexdump(&[0, 1, 0x7f])
+            .lines()
+            .next()
+            .unwrap()
+            .ends_with("|...|"));
         assert_eq!(hexdump(&[]), "");
     }
 
@@ -413,7 +516,12 @@ mod tests {
         // The same port is bindable once the holder is gone: the census is
         // measuring the kernel, not remembering the previous answer.
         let after = census_rows(&[port]);
-        assert_eq!(after[0].outcome.kind, OutcomeKind::Open, "{:?}", after[0].value);
+        assert_eq!(
+            after[0].outcome.kind,
+            OutcomeKind::Open,
+            "{:?}",
+            after[0].value
+        );
     }
 
     #[test]
@@ -433,6 +541,49 @@ mod tests {
     }
 
     #[test]
+    fn a_streamed_block_is_attributed_before_its_bytes() {
+        // The whole point of streaming is that a transcript shows *who* sent what
+        // without waiting for the run to end, so the attribution line must come
+        // first and the dump must hang off it, indented.
+        let b = conn_block(10809, 2, 44111, b"hi\n", true, "12:00:01.500");
+        let lines: Vec<&str> = b.lines().collect();
+        assert_eq!(lines.len(), 2, "{b}");
+        assert_eq!(
+            lines[0],
+            "12:00:01.500  port 10809  peer CID 2 port 44111  3 byte(s)"
+        );
+        assert_eq!(
+            lines[1], "  00000000  68 69 0a                                         |hi.|",
+            "{b}"
+        );
+    }
+
+    #[test]
+    fn a_quiet_peer_and_an_open_peer_say_so() {
+        let q = conn_block(7, 3, 1, b"", true, "00:00:00.000");
+        assert!(q.contains("peer sent nothing before closing"), "{q}");
+        assert!(!q.contains("still open"), "{q}");
+        let o = conn_block(7, 3, 1, b"", false, "00:00:00.000");
+        assert!(
+            o.contains("(read window ended, connection still open)"),
+            "{o}"
+        );
+    }
+
+    #[test]
+    fn the_clock_has_a_fixed_shape() {
+        let c = clock();
+        // HH:MM:SS.mmm - 12 characters plus separators; anything shorter means a
+        // failed syscall, which prints `?` rather than a plausible-looking zero.
+        assert!(c == "?" || c.len() == 12, "{c}");
+        if c != "?" {
+            assert_eq!(c.matches(':').count(), 2, "{c}");
+            // `HH:MM:SS.mmm`: the dot sits after the eight clock digits.
+            assert_eq!(&c[8..9], ".", "{c}");
+        }
+    }
+
+    #[test]
     fn accept_loop_logs_the_peer_and_previews_bytes() {
         let port = 47124;
         let mut report = Report::new("listen", crate::model::placeholder_header());
@@ -442,14 +593,13 @@ mod tests {
             max_conns: 1,
             timeout_ms: 3000,
             preview: 16,
+            live: Live::off(),
         };
         // Connect once from this process; loopback answers on the host and the
         // loop returns as soon as the connection is taken.
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(200));
-            let fd = unsafe {
-                libc::socket(uapi::AF_VSOCK as libc::c_int, libc::SOCK_STREAM, 0)
-            };
+            let fd = unsafe { libc::socket(uapi::AF_VSOCK as libc::c_int, libc::SOCK_STREAM, 0) };
             let addr = uapi::SockaddrVm::new(uapi::VMADDR_CID_HOST, port, false);
             unsafe {
                 libc::connect(

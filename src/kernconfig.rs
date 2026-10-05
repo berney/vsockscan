@@ -110,7 +110,10 @@ impl ConfigRead {
     /// lowercase (`vhost_vsock`) and config symbols are uppercase
     /// (`CONFIG_VHOST_VSOCK`), and every verdict is asked in module-name case.
     pub fn symbol(&self, name: &str) -> Sym {
-        let key = name.strip_prefix("CONFIG_").unwrap_or(name).to_ascii_uppercase();
+        let key = name
+            .strip_prefix("CONFIG_")
+            .unwrap_or(name)
+            .to_ascii_uppercase();
         self.syms.get(&key).copied().unwrap_or(Sym::Unknown)
     }
 
@@ -119,7 +122,9 @@ impl ConfigRead {
             (Some(s), None) => s.clone(),
             (Some(s), Some(e)) => format!("{s} (partial: {e})"),
             (None, Some(e)) => format!("unreadable: {e}"),
-            (None, None) => "no config source (IKCONFIG off, no /boot, no /lib/modules)".to_string(),
+            (None, None) => {
+                "no config source (IKCONFIG off, no /boot, no /lib/modules)".to_string()
+            }
         }
     }
 }
@@ -167,7 +172,11 @@ pub struct ModuleFacts {
 
 /// A shallow walk (depth 2) of the three places these modules live; the full
 /// tree is enormous and the rest is irrelevant here.
-const SCAN_DIRS: &[&str] = &["kernel/net/vmw_vsock", "kernel/drivers/vhost", "kernel/drivers/net"];
+const SCAN_DIRS: &[&str] = &[
+    "kernel/net/vmw_vsock",
+    "kernel/drivers/vhost",
+    "kernel/drivers/net",
+];
 
 impl ModuleFacts {
     pub fn probe(release: &str, names: &[&str]) -> ModuleFacts {
@@ -196,7 +205,9 @@ impl ModuleFacts {
             for _ in 0..2 {
                 let mut next = Vec::new();
                 for d in &frontier {
-                    let Ok(rd) = std::fs::read_dir(d) else { continue };
+                    let Ok(rd) = std::fs::read_dir(d) else {
+                        continue;
+                    };
                     for ent in rd.flatten() {
                         let p = ent.path();
                         if p.is_dir() {
@@ -313,6 +324,10 @@ pub struct VerdictQuery<'a> {
 
 fn verdict(cfg: &ConfigRead, st: &ModuleState, q: VerdictQuery<'_>) -> ModuleVerdict {
     let name = q.name;
+    // Config symbols are uppercase (`CONFIG_VHOST_VSOCK`) while module and `.ko`
+    // names are lowercase (`vhost_vsock`). Interpolating the module name into a
+    // `CONFIG_...` string invents a symbol nobody can grep for in a kernel config.
+    let sym_name = name.to_uppercase();
     let v = |state: ModuleAvailability, reason: String| ModuleVerdict {
         name: name.to_string(),
         state,
@@ -322,7 +337,10 @@ fn verdict(cfg: &ConfigRead, st: &ModuleState, q: VerdictQuery<'_>) -> ModuleVer
 
     // Observed reality outranks the config file's opinion.
     if q.node_present == Some(true) {
-        return v(ModuleAvailability::Builtin, "device node present in /dev".to_string());
+        return v(
+            ModuleAvailability::Builtin,
+            "device node present in /dev".to_string(),
+        );
     }
     if st.facts.loaded.contains(name) {
         return v(
@@ -333,7 +351,7 @@ fn verdict(cfg: &ConfigRead, st: &ModuleState, q: VerdictQuery<'_>) -> ModuleVer
     if sym == Sym::Yes || st.facts.builtin.contains(name) {
         return v(
             ModuleAvailability::Builtin,
-            format!("CONFIG_{name}={}, nothing to load", sym.as_str()),
+            format!("CONFIG_{sym_name}={}, nothing to load", sym.as_str()),
         );
     }
     if let Some(note) = q.dep_note {
@@ -344,14 +362,14 @@ fn verdict(cfg: &ConfigRead, st: &ModuleState, q: VerdictQuery<'_>) -> ModuleVer
             if st.enabled == Some(false) {
                 return v(
                     ModuleAvailability::ModulesDisabled,
-                    format!("CONFIG_{name}=m but CONFIG_MODULES is not set"),
+                    format!("CONFIG_{sym_name}=m but CONFIG_MODULES is not set"),
                 );
             }
             if !st.facts.files.contains(name) {
                 return v(
                     ModuleAvailability::Unavailable,
                     format!(
-                        "CONFIG_{name}=m, no {name}.ko found{}",
+                        "CONFIG_{sym_name}=m, no {name}.ko found{}",
                         if st.facts.modules_tree {
                             " under the scanned module directories"
                         } else {
@@ -373,11 +391,14 @@ fn verdict(cfg: &ConfigRead, st: &ModuleState, q: VerdictQuery<'_>) -> ModuleVer
                 format!("{name}.ko present and modules enabled"),
             )
         }
-        Sym::Disabled => v(ModuleAvailability::Unavailable, format!("# CONFIG_{name} is not set")),
+        Sym::Disabled => v(
+            ModuleAvailability::Unavailable,
+            format!("# CONFIG_{sym_name} is not set"),
+        ),
         Sym::Unknown => v(
             ModuleAvailability::Unknown,
             format!(
-                "CONFIG_{name} absent from {} (absent is not the same as disabled)",
+                "CONFIG_{sym_name} absent from {} (absent is not the same as disabled)",
                 cfg.describe()
             ),
         ),
@@ -487,7 +508,11 @@ mod tests {
         let c = ConfigRead::unavailable(None);
         assert_eq!(c.symbol("VSOCKETS"), Sym::Unknown);
         assert!(!c.symbol("VSOCKETS").on());
-        assert!(c.describe().contains("no config source"), "{}", c.describe());
+        assert!(
+            c.describe().contains("no config source"),
+            "{}",
+            c.describe()
+        );
     }
 
     #[test]
@@ -522,6 +547,23 @@ mod tests {
             "{}",
             v.reason
         );
+    }
+
+    #[test]
+    fn a_disabled_module_verdict_names_the_real_config_symbol() {
+        // Module names are lowercase, config symbols are uppercase. Evidence that
+        // says `# CONFIG_vhost_vsock is not set` cannot be grepped in any kernel
+        // config, which is the whole point of quoting the line.
+        let c = ConfigRead::from_text("t", "# CONFIG_VHOST_VSOCK is not set\n");
+        let st = module_state_from(&c, ModuleFacts::default());
+        let v = vhost_verdict(&c, &st, &Caps::default(), None);
+        assert_eq!(v.state, ModuleAvailability::Unavailable);
+        assert!(
+            v.reason.contains("# CONFIG_VHOST_VSOCK is not set"),
+            "{}",
+            v.reason
+        );
+        assert!(!v.reason.contains("CONFIG_vhost_vsock"), "{}", v.reason);
     }
 
     #[test]
@@ -565,7 +607,13 @@ mod tests {
         );
         // A device node trumps the config file even for a non-root user.
         assert_eq!(
-            vhost_verdict(&c, &module_state_from(&c, ModuleFacts::default()), &none, Some(true)).state,
+            vhost_verdict(
+                &c,
+                &module_state_from(&c, ModuleFacts::default()),
+                &none,
+                Some(true)
+            )
+            .state,
             ModuleAvailability::Builtin
         );
     }

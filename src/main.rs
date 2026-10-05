@@ -41,17 +41,29 @@ pub struct RuntimeError {
 
 impl From<std::io::Error> for RuntimeError {
     fn from(e: std::io::Error) -> Self {
-        RuntimeError { message: e.to_string(), usage: false, assert_failure: false }
+        RuntimeError {
+            message: e.to_string(),
+            usage: false,
+            assert_failure: false,
+        }
     }
 }
 
 impl RuntimeError {
     pub fn msg(msg: impl Into<String>) -> Self {
-        RuntimeError { message: msg.into(), usage: false, assert_failure: false }
+        RuntimeError {
+            message: msg.into(),
+            usage: false,
+            assert_failure: false,
+        }
     }
 
     pub fn usage(msg: impl Into<String>) -> Self {
-        RuntimeError { message: msg.into(), usage: true, assert_failure: false }
+        RuntimeError {
+            message: msg.into(),
+            usage: true,
+            assert_failure: false,
+        }
     }
 }
 
@@ -279,7 +291,9 @@ fn emit(cli: &Cli, report: &model::Report) -> RunResult<()> {
     let color = if cli.output.is_some() {
         render::ColorSupport::Off
     } else {
-        render::style::detect(cli.no_color, crate::tty_stdout(), &|k| std::env::var(k).ok())
+        render::style::detect(cli.no_color, crate::tty_stdout(), &|k| {
+            std::env::var(k).ok()
+        })
     };
     let mut buf: Vec<u8> = Vec::new();
     if cli.quiet {
@@ -322,7 +336,10 @@ fn run_probe(cli: &Cli, a: &ProbeArgs) -> RunResult<()> {
             report.command,
             h.posture.as_str(),
             h.device.as_str(),
-            h.cid.cid.map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string()),
+            h.cid
+                .cid
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
             report.probes.len(),
             report.findings.len()
         );
@@ -448,8 +465,8 @@ fn run_selftest(cli: &Cli) -> RunResult<()> {
 }
 
 fn run_listen(cli: &Cli, a: &ListenArgs) -> RunResult<()> {
-    let ports = spec::PortSpec::parse(&a.ports)
-        .map_err(|e| RuntimeError::usage(e + " (--ports SPEC)"))?;
+    let ports =
+        spec::PortSpec::parse(&a.ports).map_err(|e| RuntimeError::usage(e + " (--ports SPEC)"))?;
     let mut report = probe::collect(&probe::ProbeOpts {
         seqpacket: false,
         to_host: false,
@@ -480,6 +497,14 @@ fn run_listen(cli: &Cli, a: &ListenArgs) -> RunResult<()> {
             max_conns: a.max_conns,
             timeout_ms: (a.timeout * 1000.0) as i32,
             preview: a.banner,
+            // Census returns without ever waiting for anyone, so it has nothing to
+            // narrate; and prose cannot be interleaved into a JSON document, so
+            // only the human-readable format streams the live accept loop.
+            live: if a.census || cli.format != Format::Text {
+                listen::Live::off()
+            } else {
+                listen::Live(true)
+            },
         },
         &mut report,
     )
@@ -488,12 +513,7 @@ fn run_listen(cli: &Cli, a: &ListenArgs) -> RunResult<()> {
 }
 
 /// What this sweep is about to make happen, stated before it happens (spec §11).
-fn sweep_noise(
-    report: &model::Report,
-    a: &ScanArgs,
-    cids: &[u32],
-    ports: &[u32],
-) -> String {
+fn sweep_noise(report: &model::Report, a: &ScanArgs, cids: &[u32], ports: &[u32]) -> String {
     let flag_sets = match a.flags {
         crate::FlagsMode::Both => 2,
         _ => 1,
@@ -518,7 +538,11 @@ fn sweep_noise(
             "net.vsock.g2h_fallback={fallback} and ns_mode={} on this kernel: {} CID 2 \
              traffic toward the host",
             value("net.vsock.ns_mode"),
-            if fallback == "1" { "a wide sweep genuinely sends" } else { "the fallback is off, so a sweep stays" }
+            if fallback == "1" {
+                "a wide sweep genuinely sends"
+            } else {
+                "the fallback is off, so a sweep stays"
+            }
         )
     };
     format!(
@@ -534,7 +558,9 @@ fn sweep_noise(
 /// number is an error rather than a silently skipped entry, because a typo in a
 /// file nobody re-reads would otherwise drop a target from the sweep.
 fn read_cid_file(path: Option<&std::path::Path>) -> RunResult<Vec<u32>> {
-    let Some(path) = path else { return Ok(Vec::new()) };
+    let Some(path) = path else {
+        return Ok(Vec::new());
+    };
     let text = std::fs::read_to_string(path)
         .map_err(|e| RuntimeError::usage(format!("reading {}: {e}", path.display())))?;
     let mut out = Vec::new();
@@ -543,10 +569,13 @@ fn read_cid_file(path: Option<&std::path::Path>) -> RunResult<Vec<u32>> {
         if l.is_empty() {
             continue;
         }
-        out.push(
-            l.parse::<u32>()
-                .map_err(|e| RuntimeError::usage(format!("{}:{}: {l:?} is not a CID ({e})", path.display(), no + 1)))?,
-        );
+        out.push(l.parse::<u32>().map_err(|e| {
+            RuntimeError::usage(format!(
+                "{}:{}: {l:?} is not a CID ({e})",
+                path.display(),
+                no + 1
+            ))
+        })?);
     }
     Ok(out)
 }
@@ -560,7 +589,13 @@ fn tty_stdout() -> bool {
 impl From<RuntimeError> for ExitCode {
     fn from(e: RuntimeError) -> Self {
         eprintln!("vsockscan: {}", e.message);
-        ExitCode::from(if e.assert_failure { 3 } else if e.usage { 1 } else { 2 })
+        ExitCode::from(if e.assert_failure {
+            3
+        } else if e.usage {
+            1
+        } else {
+            2
+        })
     }
 }
 

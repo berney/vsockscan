@@ -13,7 +13,10 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
     writeln!(
         out,
         "{}",
-        c.bold(&format!("# vsockscan {} ({})", report.version, report.command))
+        c.bold(&format!(
+            "# vsockscan {} ({})",
+            report.version, report.command
+        ))
     )?;
     let caps = if h.caps.is_empty() {
         "none".to_owned()
@@ -25,7 +28,10 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
     writeln!(
         out,
         "cid      {}   via {}",
-        h.cid.cid.map(|v| v.to_string()).unwrap_or_else(|| "?".into()),
+        h.cid
+            .cid
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "?".into()),
         h.cid.source
     )?;
     writeln!(out, "posture  {}", h.posture.as_str())?;
@@ -39,7 +45,13 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
         }
     )?;
     for m in &h.module_verdicts {
-        writeln!(out, "module   {:<14} {}   {}", m.name, m.state.as_str(), m.reason)?;
+        writeln!(
+            out,
+            "module   {:<14} {}   {}",
+            m.name,
+            m.state.as_str(),
+            m.reason
+        )?;
     }
     if h.sysctls.is_empty() {
         writeln!(out, "sysctl   (none read)")?;
@@ -160,7 +172,8 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
 /// The summary block on its own: this is what `-q` prints, for a transcript that
 /// should say how a run went without repeating it.
 pub fn summary(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Result<()> {
-    writeln!(out)?;    let mut parts: Vec<String> = report
+    writeln!(out)?;
+    let mut parts: Vec<String> = report
         .summary
         .by_outcome
         .iter()
@@ -178,7 +191,11 @@ pub fn summary(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Res
         // disagreed", so it is the one place the palette earns its keep here.
         let word = if agree { "yes" } else { "NO" };
         let word = c.fg(
-            if agree { style::READOUT_GREEN } else { style::WARNING_AMBER },
+            if agree {
+                style::READOUT_GREEN
+            } else {
+                style::WARNING_AMBER
+            },
             word,
         );
         write!(out, " flags-agree={word}")?;
@@ -226,7 +243,9 @@ fn write_outcome(
             None => "-".to_owned(),
         },
     };
-    write!(out, "{: <16}", errno)?;
+    // 20 wide: `ESOCKTNOSUPPORT(94)` is 19 characters, and an errno that
+    // overflows its column glues itself to the explanation behind it.
+    write!(out, "{: <20}", errno)?;
     if inline_detail {
         if let Some(d) = &o.detail {
             write!(out, "{}", d)?;
@@ -251,7 +270,11 @@ mod tests {
             detail: "vsock_loopback not built".into(),
         });
         for (flags, kind, errno) in [
-            (FlagSet::None, OutcomeKind::RefusedKernel, Some(libc::ENODEV)),
+            (
+                FlagSet::None,
+                OutcomeKind::RefusedKernel,
+                Some(libc::ENODEV),
+            ),
             (FlagSet::ToHost, OutcomeKind::Open, None),
         ] {
             let o = match errno {
@@ -267,7 +290,10 @@ mod tests {
                 banner: None,
             });
         }
-        r.finding(Severity::Alert, "device present: this is not the target shape");
+        r.finding(
+            Severity::Alert,
+            "device present: this is not the target shape",
+        );
         r.recompute_summary(9);
         r
     }
@@ -338,8 +364,12 @@ mod tests {
         let t = s(&report(), ColorSupport::Off);
         let rows: Vec<&str> = t.lines().filter(|l| l.starts_with("2  ")).collect();
         assert_eq!(rows.len(), 2, "one line per result row:\n{t}");
-        assert!(rows.iter().any(|l| l.contains("refused-kernel") && l.contains("ENODEV(19)")));
-        assert!(rows.iter().any(|l| l.contains("to-host") && l.contains("open")));
+        assert!(rows
+            .iter()
+            .any(|l| l.contains("refused-kernel") && l.contains("ENODEV(19)")));
+        assert!(rows
+            .iter()
+            .any(|l| l.contains("to-host") && l.contains("open")));
         assert!(t.contains("device   unknown"));
         assert!(t.contains("cid2-loopback-canary   inert"), "{t}");
         assert!(t.contains("[alert] device present"));

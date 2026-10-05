@@ -206,7 +206,18 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
     }
     writeln!(out, "- elapsed: `{} ms`", report.summary.elapsed_ms)?;
     for n in &report.summary.notes {
-        writeln!(out, "- note: {}", escape(n))?;
+        // Multi-line notes carry byte dumps; a fenced block is the only markdown
+        // that preserves their column alignment.
+        if let Some((head, rest)) = n.split_once('\n') {
+            writeln!(out, "- note: {}", escape(head))?;
+            writeln!(out, "```")?;
+            // The dump's own trailing newline would otherwise leave an empty line
+            // inside the fence.
+            writeln!(out, "{}", rest.trim_end_matches('\n'))?;
+            writeln!(out, "```")?;
+        } else {
+            writeln!(out, "- note: {}", escape(n))?;
+        }
     }
     Ok(())
 }

@@ -173,7 +173,13 @@ pub fn render(report: &Report, c: ColorSupport, out: &mut dyn Write) -> io::Resu
     }
     writeln!(out, " elapsed={}ms", report.summary.elapsed_ms)?;
     for n in &report.summary.notes {
-        writeln!(out, "  note   {n}")?;
+        // A note may legitimately carry a hexdump; its continuation lines stay
+        // under the note column so `grep note` still shows whole facts.
+        let mut lines = n.lines();
+        writeln!(out, "  note   {}", lines.next().unwrap_or(""))?;
+        for rest in lines {
+            writeln!(out, "         {rest}")?;
+        }
     }
     Ok(())
 }
@@ -283,6 +289,24 @@ mod tests {
         let mut b = Vec::new();
         render(r, c, &mut b).unwrap();
         String::from_utf8(b).unwrap()
+    }
+
+    /// Notes hold byte dumps, and a dump whose second line starts at column 0 is
+    /// no longer readable as part of the note it belongs to.
+    #[test]
+    fn multiline_notes_stay_under_their_column() {
+        let mut r = report();
+        r.summary.notes.push(
+            "first bytes from 1234:\n00000000  76 73 6f 63 6b   |vsock|\n00000005  00   |.|"
+                .to_string(),
+        );
+        let t = s(&r, ColorSupport::Off);
+        let at = t.find("first bytes from 1234:").expect("the note");
+        let line_start = t[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let block: Vec<&str> = t[line_start..].lines().take(3).collect();
+        assert!(block[0].starts_with("  note   "), "{}", block[0]);
+        assert!(block[1].starts_with("         00000000"), "{}", block[1]);
+        assert!(block[2].starts_with("         00000005"), "{}", block[2]);
     }
 
     #[test]

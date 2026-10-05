@@ -7,6 +7,7 @@ mod caps;
 mod diag;
 mod gunzip;
 mod kernconfig;
+mod listen;
 mod model;
 mod probe;
 mod render;
@@ -188,8 +189,14 @@ pub struct ListenArgs {
     pub census: bool,
     #[arg(long, default_value_t = 0)]
     pub max_conns: usize,
-    #[arg(long, default_value_t = 0.0)]
+    /// How long to hold the ports. `0` means bind, report, exit: a liveness
+    /// check rather than a listener.
+    #[arg(long, default_value_t = 10.0, value_name = "SEC")]
     pub timeout: f64,
+    /// Bytes to hexdump from each accepted connection (`scan --banner`'s
+    /// counterpart on the accept side).
+    #[arg(long, default_value_t = 64, value_name = "N")]
+    pub banner: usize,
 }
 
 /// Colour must be decided before clap renders help/errors, so inspect argv directly.
@@ -256,8 +263,9 @@ fn main() -> ExitCode {
     let res: RunResult<()> = match command {
         Command::Probe(a) => run_probe(&cli, a),
         Command::Scan(a) => run_scan(&cli, a),
-        Command::Listen(_) | Command::Selftest => Err(RuntimeError::msg(
-            "not implemented yet: listen/selftest land in plan Tasks 7-8",
+        Command::Listen(a) => run_listen(&cli, a),
+        Command::Selftest => Err(RuntimeError::msg(
+            "not implemented yet: selftest lands in plan Task 8",
         )),
     };
     res.map_or_else(From::from, |_| ExitCode::SUCCESS)
@@ -391,6 +399,46 @@ fn run_scan(cli: &Cli, a: &ScanArgs) -> RunResult<()> {
         spec_notes: Vec::new(),
     };
     scan::run(&opts, &mut report).map_err(RuntimeError::usage)?;
+    emit(cli, &report)
+}
+
+fn run_listen(cli: &Cli, a: &ListenArgs) -> RunResult<()> {
+    let ports = spec::PortSpec::parse(&a.ports)
+        .map_err(|e| RuntimeError::usage(e + " (--ports SPEC)"))?;
+    let mut report = probe::collect(&probe::ProbeOpts {
+        seqpacket: false,
+        to_host: false,
+        vsockmon: false,
+        config: true,
+        mmio: false,
+        diag: true,
+    });
+    report.command = "listen".to_string();
+    report.header.noise = if a.census {
+        format!(
+            "bind-only census of {} port(s): a bind either succeeds or is refused by the \
+             kernel's own checks; nothing is sent to anyone",
+            ports.0.len()
+        )
+    } else {
+        format!(
+            "holding {} port(s) for {} s and accepting; bytes are read for identification and \
+             never written back, but a peer learns that something answered",
+            ports.0.len(),
+            a.timeout
+        )
+    };
+    listen::run(
+        &listen::Opts {
+            ports: &ports.0,
+            census: a.census,
+            max_conns: a.max_conns,
+            timeout_ms: (a.timeout * 1000.0) as i32,
+            preview: a.banner,
+        },
+        &mut report,
+    )
+    .map_err(RuntimeError::msg)?;
     emit(cli, &report)
 }
 

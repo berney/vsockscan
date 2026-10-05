@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::caps::Caps;
+use crate::diag;
 use crate::kernconfig::{self, ConfigRead, ModuleState, Sym, WATCHED};
 
 /// The symbols that decide what vsock can do here, in report order.
@@ -900,7 +901,13 @@ pub fn collect(opts: &ProbeOpts) -> Report {
         );
     }
     report.header.diag = if opts.diag {
-        DiagStatus::Unavailable("the SOCK_DIAG census lands with the diag module".to_string())
+        match diag::census_with_pids(diag::ALL_STATES) {
+            Ok(rows) => {
+                report.diag_entries = rows.clone();
+                DiagStatus::Available { entries: rows.len() }
+            }
+            Err(e) => DiagStatus::Unavailable(e.to_string()),
+        }
     } else {
         DiagStatus::Skipped
     };

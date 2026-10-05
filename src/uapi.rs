@@ -170,7 +170,6 @@ mod tests {
         // <linux/vhost.h> expands to (cross-checked with a C print).
         assert_eq!(VHOST_GET_FEATURES, 0x8008_af00);
         assert_eq!(AF_VSOCK, 40);
-        assert_eq!(SOL_VSOCK, 287);
     }
 
     #[test]

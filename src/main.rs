@@ -4,6 +4,7 @@
 //! `3` selftest assertion failure.
 
 mod caps;
+mod diag;
 mod gunzip;
 mod kernconfig;
 mod model;

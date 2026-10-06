@@ -17,7 +17,7 @@
 //! | severity `info`                   | `DIM_ALUMINUM` #9ca3b0 |
 //! | outcome `open`                    | `READOUT_GREEN` #00ff88 |
 //! | outcome `closed` / `unsupported`  | `WARNING_AMBER` #ffb347 |
-//! | outcome `silent` / `refused-kernel` | `DIM_ALUMINUM` #9ca3b0 |
+//! | outcome `silent` / `refused-kernel` / `absent` / `denied` / `stale` / `not-muxer` | `DIM_ALUMINUM` #9ca3b0 |
 //! | outcome `loopback-redirect` / `error` | `ALERT_RED` #ff4757 |
 //! | tell `yes`                        | `ALERT_RED` #ff4757 |
 //! | tell `unknown`                    | `WARNING_AMBER` #ffb347 |
@@ -122,6 +122,9 @@ pub fn outcome_fg(kind: OutcomeKind) -> &'static str {
         OutcomeKind::Open => READOUT_GREEN,
         OutcomeKind::Closed | OutcomeKind::Unsupported => WARNING_AMBER,
         OutcomeKind::Silent | OutcomeKind::RefusedKernel => DIM_ALUMINUM,
+        OutcomeKind::Absent | OutcomeKind::Denied | OutcomeKind::Stale | OutcomeKind::NotMuxer => {
+            DIM_ALUMINUM
+        }
         OutcomeKind::LoopbackRedirect | OutcomeKind::Error => ALERT_RED,
     }
 }

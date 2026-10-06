@@ -56,6 +56,14 @@ pub enum OutcomeKind {
     Unsupported,
     /// Anything we could not classify honestly.
     Error,
+    /// h2g: no listener at the device uds_path (AF_UNIX connect ENOENT).
+    Absent,
+    /// h2g: the socket file exists but its permissions deny us (EACCES).
+    Denied,
+    /// h2g: a socket file with no listener - a VM that died without cleanup.
+    Stale,
+    /// h2g: something answered our handshake that is not a Firecracker muxer.
+    NotMuxer,
 }
 
 impl OutcomeKind {
@@ -68,6 +76,10 @@ impl OutcomeKind {
             OutcomeKind::LoopbackRedirect => "loopback-redirect",
             OutcomeKind::Unsupported => "unsupported",
             OutcomeKind::Error => "error",
+            OutcomeKind::Absent => "absent",
+            OutcomeKind::Denied => "denied",
+            OutcomeKind::Stale => "stale",
+            OutcomeKind::NotMuxer => "not-muxer",
         }
     }
 }
@@ -325,6 +337,18 @@ pub struct ProbeRow {
     /// Measured value when the probe is not a connect (ioctl answer, features).
     pub value: Option<String>,
     pub flags: FlagSet,
+}
+
+/// Keep only rows whose kind is `Open`, counting what was dropped. Callers
+/// record the count in a note; `--open` must never silently shrink a sweep
+/// (spec 2026-10-07-h2g-open §6).
+// Wired into the `h2g` sweep and `--open` by a later task (spec §6, §7); at
+// this commit only the unit tests call it, so the binary build sees it unused.
+#[allow(dead_code)]
+pub fn filter_open(probes: &mut Vec<ProbeRow>) -> usize {
+    let before = probes.len();
+    probes.retain(|r| r.outcome.kind == OutcomeKind::Open);
+    before - probes.len()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -642,5 +666,34 @@ mod tests {
             serde_json::from_str::<SysctlValue>("\"absent\"").unwrap(),
             SysctlValue::Absent
         );
+    }
+
+    #[test]
+    fn h2g_kinds_have_strings_and_are_distinct() {
+        assert_eq!(OutcomeKind::Absent.as_str(), "absent");
+        assert_eq!(OutcomeKind::Denied.as_str(), "denied");
+        assert_eq!(OutcomeKind::Stale.as_str(), "stale");
+        assert_eq!(OutcomeKind::NotMuxer.as_str(), "not-muxer");
+    }
+
+    #[test]
+    fn filter_open_keeps_only_open_rows_and_counts() {
+        let row = |k: OutcomeKind| ProbeRow {
+            name: String::new(),
+            outcome: Outcome::new(k),
+            value: None,
+            flags: FlagSet::None,
+        };
+        let mut rows = vec![
+            row(OutcomeKind::Open),
+            row(OutcomeKind::Closed),
+            row(OutcomeKind::Open),
+            row(OutcomeKind::Stale),
+        ];
+        let kept = filter_open(&mut rows);
+        assert_eq!(kept, 2);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.outcome.kind == OutcomeKind::Open));
+        assert_eq!(filter_open(&mut Vec::new()), 0);
     }
 }

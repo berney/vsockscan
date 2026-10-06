@@ -192,7 +192,7 @@ const SCHEMA: &str = r##"{
       "type": "object",
       "required": ["kind"],
       "properties": {
-        "kind": {"type": "string", "enum": ["open", "closed", "refused-kernel", "silent", "loopback-redirect", "unsupported", "error"]},
+        "kind": {"type": "string", "enum": ["open", "closed", "refused-kernel", "silent", "loopback-redirect", "unsupported", "error", "absent", "denied", "stale", "not-muxer"]},
         "errno": {"type": ["integer", "null"]},
         "errno-name": {"type": ["string", "null"]},
         "detail": {"type": ["string", "null"]}
@@ -372,5 +372,19 @@ mod tests {
             .cloned()
             .collect::<Vec<_>>();
         assert_eq!(header, doc_header, "header key drift");
+    }
+
+    #[test]
+    fn schema_lists_the_h2g_outcomes() {
+        let schema: serde_json::Value = serde_json::from_str(&json_schema()).unwrap();
+        let kinds = schema["definitions"]["outcome"]["properties"]["kind"]["enum"]
+            .as_array()
+            .expect("kind enum");
+        for want in ["absent", "denied", "stale", "not-muxer"] {
+            assert!(
+                kinds.iter().any(|k| k == want),
+                "{want} missing from {kinds:?}"
+            );
+        }
     }
 }

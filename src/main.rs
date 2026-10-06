@@ -174,7 +174,10 @@ pub struct ProbeArgs {
     /// Also run the classification probes with VMADDR_FLAG_TO_HOST set.
     #[arg(long)]
     pub to_host: bool,
-    /// Report vsockmon state (builtin / loadable / modules-disabled / unavailable).
+    /// Report vsockmon state (builtin / loaded / loadable / modules-disabled / unavailable).
+    /// `loaded` means live now by a signal that does not prove how it got there: from outside the
+    /// kernel a loaded `=m` module and a built-in are indistinguishable, so `builtin` needs
+    /// `CONFIG_X=y` as well.
     #[arg(long)]
     pub vsockmon: bool,
     /// Opt-in: create `ip link add <NAME> type vsockmon` and print the capture recipe.

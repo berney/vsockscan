@@ -67,8 +67,9 @@ fn no_message_carries_a_run_of_spaces() {
         "render/mod.rs",
         "render/text.rs",
         "render/markdown.rs",
-        "render/json.rs",
         "render/yaml.rs",
+        "muxer.rs",
+        "h2g.rs",
     ];
     let mut all = Vec::new();
     for f in files {

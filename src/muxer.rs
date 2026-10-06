@@ -13,9 +13,7 @@
 
 use std::path::Path;
 
-// The handshake client is wired into a command by a later commit, so right now
-// only the unit tests call it and the binary build sees it unused.
-#[allow(dead_code)]
+// The handshake client is wired into the sweep by `h2g::run`; see `probe`.
 pub enum Attempt {
     Open { host_port: u32 },
     Closed,
@@ -40,8 +38,6 @@ pub fn parse_response(line: &str) -> Option<u32> {
 /// One connect + handshake against `path`, never holding the channel longer
 /// than the handshake plus `banner` bytes. `Err` never escapes: every host
 /// outcome (including filesystem answers) is an `Attempt`.
-// Reachable from the tests only until the command lands; see `Attempt`.
-#[allow(dead_code)]
 pub fn probe(path: &Path, port: u32, timeout_ms: i32, banner: usize) -> (Attempt, Vec<u8>) {
     use std::os::unix::ffi::OsStrExt;
     let raw = path.as_os_str().as_bytes();

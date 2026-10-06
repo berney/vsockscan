@@ -8,6 +8,11 @@
 mod caps;
 mod diag;
 mod gunzip;
+// The `h2g` subcommand is wired into the CLI by the next commit; until then
+// only this module's own tests call `run`, so the binary build sees it unused
+// (and `run` is what keeps `muxer::probe` and `model::filter_open` live).
+#[allow(dead_code)]
+mod h2g;
 mod kernconfig;
 mod listen;
 mod model;

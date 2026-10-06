@@ -342,9 +342,6 @@ pub struct ProbeRow {
 /// Keep only rows whose kind is `Open`, counting what was dropped. Callers
 /// record the count in a note; `--open` must never silently shrink a sweep
 /// (spec 2026-10-07-h2g-open §6).
-// Wired into the `h2g` sweep and `--open` by a later task (spec §6, §7); at
-// this commit only the unit tests call it, so the binary build sees it unused.
-#[allow(dead_code)]
 pub fn filter_open(probes: &mut Vec<ProbeRow>) -> usize {
     let before = probes.len();
     probes.retain(|r| r.outcome.kind == OutcomeKind::Open);

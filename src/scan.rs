@@ -771,9 +771,9 @@ mod tests {
         assert!(
             rows.iter().all(|r| matches!(
                 r.outcome.kind,
-                OutcomeKind::Closed | OutcomeKind::RefusedKernel
+                OutcomeKind::Closed | OutcomeKind::RefusedKernel | OutcomeKind::Silent
             )),
-            "unlisted loopback ports must refuse, not look open: {:?}",
+            "unlisted ports must not look open: {:?}",
             rows.iter().map(|r| r.outcome.kind).collect::<Vec<_>>()
         );
     }

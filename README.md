@@ -24,8 +24,9 @@ host build: `cargo build --target x86_64-unknown-linux-gnu`.
 |---|---|---|
 | `probe` | capabilities, device tells, local CID, kernel config (`--config`), module state, `vsock_diag` census (`--diag`), SEQPACKET support | a few connects to CIDs 1/2 plus a loopback canary |
 | `scan --cid <spec> --ports <spec>` | reachability sweep over a CID x port matrix; `--flags both` repeats every connect with `VMADDR_FLAG_TO_HOST` set | real; volume is printed before it starts |
-| `listen --ports <spec>` | accept on ports, log peer CID/port and a hexdump preview (`--banner N`) | binds; accepts |
+| `listen --ports <spec>` | accept on ports, log peer CID/port and a hexdump preview (`--banner N`); `--forever` holds until Ctrl-C, and every exit names its reason (timeout / `--max-conns` / SIGINT) | binds; accepts |
 | `listen --census --ports <spec>` | bind-only occupancy (`--timeout 0`): distinguishes `EACCES` (privilege) from `EADDRINUSE` (occupied) | binds only |
+| `listen --uds PATH --ports <spec>` | accept on AF_UNIX path `PATH_<port>` — the socket a Firecracker guest's connect to (CID 2, port) arrives at; its userspace vsock proxy never touches the host kernel's AF_VSOCK, so an `AF_VSOCK` listener on a Firecracker host sees nothing | accepts on Unix sockets |
 | `selftest` | nine loopback checks that prove the outcome classifier with no device, no host, no `socat` | loopback only |
 
 Output: `--format text|markdown|json|yaml`, `-o FILE`, `--json-schema` for the document
@@ -83,7 +84,7 @@ Every rule below exists because a measurement broke a reasonable-looking alterna
 
 ## Tests
 
-`cargo test --release` — 110 unit, 4 integration, 1 doc; `cargo clippy --release
+`cargo test --release` — 116 unit, 5 integration, 1 doc; `cargo clippy --release
 --all-targets -- -D warnings` clean. Integration coverage includes the renderers' colour
 contract (stripping SGR from a coloured render yields byte-identical output for `text`
 and `yaml`, valid JSON for `json`, colour-optional Markdown), the pinned `vsock_diag`

@@ -246,6 +246,13 @@ pub struct ListenArgs {
     /// counterpart on the accept side).
     #[arg(long, default_value_t = 64, value_name = "N")]
     pub banner: usize,
+    /// Accept Firecracker guest-to-host connections on AF_UNIX paths
+    /// `<PATH>_<port>` instead of kernel AF_VSOCK sockets.
+    #[arg(long, value_name = "PATH", conflicts_with = "census")]
+    pub uds: Option<std::path::PathBuf>,
+    /// Hold the ports until Ctrl-C or --max-conns; overrides --timeout.
+    #[arg(long)]
+    pub forever: bool,
 }
 
 /// Colour must be decided before clap renders help/errors, so inspect argv directly.
@@ -516,18 +523,30 @@ fn run_listen(cli: &Cli, a: &ListenArgs) -> RunResult<()> {
         diag: true,
     });
     report.command = "listen".to_string();
+    let held = if a.forever {
+        "with no deadline (--forever)".to_string()
+    } else {
+        format!("{} s", a.timeout)
+    };
     report.header.noise = if a.census {
         format!(
             "bind-only census of {} port(s): a bind either succeeds or is refused by the \
              kernel's own checks; nothing is sent to anyone",
             ports.0.len()
         )
+    } else if let Some(p) = &a.uds {
+        format!(
+            "holding {} UDS path(s) under {} {held} and accepting; Firecracker's userspace \
+             vsock proxy connects to <path>_<port> when its guest opens (CID 2, port) - the \
+             host kernel's AF_VSOCK is not involved",
+            ports.0.len(),
+            p.display()
+        )
     } else {
         format!(
-            "holding {} port(s) for {} s and accepting; bytes are read for identification and \
+            "holding {} port(s) {held} and accepting; bytes are read for identification and \
              never written back, but a peer learns that something answered",
-            ports.0.len(),
-            a.timeout
+            ports.0.len()
         )
     };
     listen::run(
@@ -535,8 +554,14 @@ fn run_listen(cli: &Cli, a: &ListenArgs) -> RunResult<()> {
             ports: &ports.0,
             census: a.census,
             max_conns: a.max_conns,
-            timeout_ms: (a.timeout * 1000.0) as i32,
+            timeout_ms: if a.forever {
+                0
+            } else {
+                (a.timeout * 1000.0) as i32
+            },
             preview: a.banner,
+            uds: a.uds.as_deref(),
+            forever: a.forever,
             // Census returns without ever waiting for anyone, so it has nothing to
             // narrate; and prose cannot be interleaved into a JSON document, so
             // only the human-readable format streams the live accept loop.

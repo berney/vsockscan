@@ -677,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_open_keeps_only_open_rows_and_counts() {
+    fn filter_open_keeps_only_open_rows_and_returns_dropped_count() {
         let row = |k: OutcomeKind| ProbeRow {
             name: String::new(),
             outcome: Outcome::new(k),
@@ -688,11 +688,11 @@ mod tests {
             row(OutcomeKind::Open),
             row(OutcomeKind::Closed),
             row(OutcomeKind::Open),
+            row(OutcomeKind::Open),
             row(OutcomeKind::Stale),
         ];
-        let kept = filter_open(&mut rows);
-        assert_eq!(kept, 2);
-        assert_eq!(rows.len(), 2);
+        assert_eq!(filter_open(&mut rows), 2, "returns the DROPPED count");
+        assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|r| r.outcome.kind == OutcomeKind::Open));
         assert_eq!(filter_open(&mut Vec::new()), 0);
     }

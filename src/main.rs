@@ -11,6 +11,7 @@ mod gunzip;
 mod kernconfig;
 mod listen;
 mod model;
+mod muxer;
 mod probe;
 mod render;
 mod scan;

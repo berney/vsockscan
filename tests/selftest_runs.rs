@@ -11,6 +11,14 @@ fn bin() -> Command {
 }
 
 #[test]
+fn version_flag_prints_semver() {
+    let out = bin().arg("--version").output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(&format!("vsockscan {}", env!("CARGO_PKG_VERSION"))));
+}
+
+#[test]
 fn selftest_passes_with_no_fixture_and_no_device() {
     let out = bin()
         .args(["selftest", "--format", "json", "--no-color"])

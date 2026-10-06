@@ -360,6 +360,13 @@ fn filter_open_by<T>(rows: &mut Vec<T>, kind: impl Fn(&T) -> OutcomeKind) -> usi
     before - rows.len()
 }
 
+/// The single source of this note's wording: both sweeps (`scan`, `h2g`) call
+/// it, so `--open` can never read differently between commands. The wording is
+/// the contract — call sites' tests pin the exact string.
+pub fn open_note(kept: usize, total: usize) -> String {
+    format!("--open: showing {kept} open row(s) of {total}")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ScanRow {
@@ -704,5 +711,13 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|r| r.outcome.kind == OutcomeKind::Open));
         assert_eq!(filter_open(&mut Vec::new()), 0);
+    }
+
+    #[test]
+    fn open_note_wording_is_the_contract() {
+        // Both sweeps render this note through `open_note`; call-site tests in
+        // `scan`/`h2g` assert this exact string, so pin it here as well.
+        assert_eq!(open_note(1, 2), "--open: showing 1 open row(s) of 2");
+        assert_eq!(open_note(0, 1), "--open: showing 0 open row(s) of 1");
     }
 }

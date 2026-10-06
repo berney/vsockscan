@@ -415,11 +415,7 @@ pub fn run(o: &Opts, report: &mut Report) -> Result<(), String> {
 /// command's sweep and nothing else.
 fn apply_open(report: &mut Report) -> String {
     let dropped = crate::model::filter_open_rows(&mut report.rows);
-    format!(
-        "--open: showing {} open row(s) of {}",
-        report.rows.len(),
-        report.rows.len() + dropped
-    )
+    crate::model::open_note(report.rows.len(), report.rows.len() + dropped)
 }
 
 /// `(cid, port, outcome-none, outcome-to-host)` for every pair present.

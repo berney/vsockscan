@@ -8,7 +8,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::model::{filter_open, FlagSet, Outcome, OutcomeKind, ProbeRow, Report, Severity};
+use crate::model::{
+    filter_open, open_note, FlagSet, Outcome, OutcomeKind, ProbeRow, Report, Severity,
+};
 use crate::muxer::{self, Attempt};
 
 pub struct Opts<'a> {
@@ -242,15 +244,23 @@ pub fn run(o: &Opts, report: &mut Report) -> Result<(), String> {
         );
     }
     // The summary counts the sweep, never the filtered view: `--open` shrinks
-    // the rows, not the evidence of what was probed.
+    // the rows, not the evidence of what was probed. Counted directly, before
+    // the filter: `recompute_summary` belongs to scan's row shape and would
+    // set `flags_agree`, which h2g has no notion of.
+    let mut by_outcome: std::collections::BTreeMap<String, usize> = Default::default();
+    for r in &rows {
+        *by_outcome
+            .entry(r.outcome.kind.as_str().to_owned())
+            .or_insert(0) += 1;
+    }
+    report.summary.by_outcome = by_outcome;
     report.summary.results = rows.len();
     if o.open_only {
         let dropped_open = filter_open(&mut rows);
-        report.summary.notes.push(format!(
-            "--open: showing {} open row(s) of {}",
-            rows.len(),
-            rows.len() + dropped_open
-        ));
+        report
+            .summary
+            .notes
+            .push(open_note(rows.len(), rows.len() + dropped_open));
     }
     report.probes.extend(rows);
     Ok(())
@@ -495,5 +505,61 @@ mod tests {
             "{:?}",
             plain.summary.notes
         );
+    }
+
+    #[test]
+    fn summary_counts_outcomes_of_the_sweep() {
+        let (dir, path) = sock("by-outcome");
+        // (open, closed, open): the fake answers 1235 and 1237 only.
+        fake_muxer(path.clone(), vec![1235, 1237], None);
+        wait_for_bind(&path);
+        let mut report = Report::new("h2g", crate::model::placeholder_header());
+        run(&opts(&[1235, 1236, 1237], &path), &mut report).expect("the sweep completes");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(report.summary.results, 3, "{:?}", report.probes);
+        let expected: std::collections::BTreeMap<String, usize> =
+            [("closed".to_owned(), 1), ("open".to_owned(), 2)]
+                .into_iter()
+                .collect();
+        assert_eq!(report.summary.by_outcome, expected);
+    }
+
+    #[test]
+    fn open_only_keeps_the_swept_outcome_counts() {
+        let (dir, path) = sock("by-outcome-open");
+        fake_muxer(path.clone(), vec![1235, 1237], None);
+        wait_for_bind(&path);
+        let ports = [1235u32, 1236, 1237];
+        let mut report = Report::new("h2g", crate::model::placeholder_header());
+        let o = Opts {
+            open_only: true,
+            ..opts(&ports, &path)
+        };
+        run(&o, &mut report).expect("the sweep completes");
+        let _ = std::fs::remove_dir_all(&dir);
+        // `--open` removes displayed rows only: results and by_outcome keep the
+        // pre-filter sweep.
+        assert_eq!(report.summary.results, 3);
+        let expected: std::collections::BTreeMap<String, usize> =
+            [("closed".to_owned(), 1), ("open".to_owned(), 2)]
+                .into_iter()
+                .collect();
+        assert_eq!(report.summary.by_outcome, expected);
+        assert_eq!(report.probes.len(), 2, "{:?}", report.probes);
+        assert!(
+            report
+                .probes
+                .iter()
+                .all(|r| r.outcome.kind == OutcomeKind::Open),
+            "{:?}",
+            report.probes
+        );
+        let note = report
+            .summary
+            .notes
+            .iter()
+            .find(|n| n.contains("--open"))
+            .expect("the filter is noted");
+        assert_eq!(note, "--open: showing 2 open row(s) of 3");
     }
 }

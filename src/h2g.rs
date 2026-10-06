@@ -286,25 +286,34 @@ mod tests {
 
     /// A stand-in muxer: reads `CONNECT <port>`, answers `OK 1073741824`
     /// (plus optional banner bytes) for the ports in `open`, and hangs up on
-    /// everything else. Bounded at 30 connections and polling for the scratch
-    /// dir to disappear, so a finished or panicked test never strands it.
+    /// everything else. Serves at most 30 accepted connections inside a
+    /// 10 s wall-clock budget and polls for the scratch dir to disappear, so
+    /// a finished or panicked test never strands it - and idle WouldBlock
+    /// polls between connections are patience, not connection budget.
     fn fake_muxer(path: PathBuf, open: Vec<u32>, banner: Option<&'static [u8]>) {
         std::thread::spawn(move || {
             let l = UnixListener::bind(&path).expect("the fake muxer binds");
             l.set_nonblocking(true).expect("nonblocking listener");
-            for _ in 0..30 {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let mut served = 0usize;
+            while served < 30 && std::time::Instant::now() < deadline {
                 if path.parent().is_none_or(|d| !d.exists()) {
                     break;
                 }
                 let (mut s, _) = match l.accept() {
-                    Ok(pair) => pair,
+                    Ok(pair) => {
+                        served += 1;
+                        pair
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(std::time::Duration::from_millis(5));
                         continue;
                     }
                     Err(_) => break,
                 };
-                // accepted streams inherit the listener's nonblocking mode
+                // Linux does not propagate the listener's nonblocking mode to
+                // accepted streams (OpenBSD does); this explicit clear is what
+                // makes the blocking reads below safe.
                 let _ = s.set_nonblocking(false);
                 let mut line = String::new();
                 let mut b = [0u8; 1];

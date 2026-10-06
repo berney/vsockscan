@@ -8,10 +8,6 @@
 mod caps;
 mod diag;
 mod gunzip;
-// The `h2g` subcommand is wired into the CLI by the next commit; until then
-// only this module's own tests call `run`, so the binary build sees it unused
-// (and `run` is what keeps `muxer::probe` and `model::filter_open` live).
-#[allow(dead_code)]
 mod h2g;
 mod kernconfig;
 mod listen;
@@ -165,6 +161,9 @@ pub enum Command {
     Scan(ScanArgs),
     /// Accept on one or more ports; log peer CID/port and a byte preview.
     Listen(ListenArgs),
+    /// From the Firecracker host: sweep a guest's ports through the muxer's
+    /// CONNECT/OK handshake on its uds_path.
+    H2g(H2gArgs),
     /// Loopback fixture: prove scan semantics with no host, no device, no socat.
     Selftest,
 }
@@ -233,6 +232,10 @@ pub struct ScanArgs {
     /// File with one CID per line, merged into the curated set.
     #[arg(long, value_name = "FILE")]
     pub cid_file: Option<std::path::PathBuf>,
+    /// Report only rows whose answer was open; the swept count stays in the
+    /// summary note.
+    #[arg(long)]
+    pub open: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -259,6 +262,29 @@ pub struct ListenArgs {
     /// Hold the ports until Ctrl-C or --max-conns; overrides --timeout.
     #[arg(long)]
     pub forever: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct H2gArgs {
+    /// The Firecracker vsock device's uds_path, exactly as configured
+    /// (a guest CONNECT to (CID 2, P) arrives at <PATH>; this direction
+    /// adds no _P suffix).
+    #[arg(long, value_name = "PATH")]
+    pub uds: std::path::PathBuf,
+    #[arg(long, value_name = "SPEC", default_value = "top")]
+    pub ports: String,
+    #[arg(long, default_value_t = 2.0, value_name = "SEC")]
+    pub timeout: f64,
+    /// Parallel connects. The muxer's table holds 1023 channels shared with
+    /// the guest; the cap keeps a sweep far below it.
+    #[arg(long, default_value_t = 16, value_name = "N")]
+    pub parallel: usize,
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    pub banner: usize,
+    /// Report only ports the guest answered on; the swept count stays in the
+    /// summary note.
+    #[arg(long)]
+    pub open: bool,
 }
 
 /// Colour must be decided before clap renders help/errors, so inspect argv directly.
@@ -319,7 +345,7 @@ fn main() -> ExitCode {
             cmd.styles(style::clap_styles())
         };
         let _ = cmd.write_help(&mut std::io::stderr());
-        eprintln!("\nvsockscan: a subcommand is required (probe | scan | listen | selftest)");
+        eprintln!("\nvsockscan: a subcommand is required (probe | scan | listen | h2g | selftest)");
         return ExitCode::from(1);
     };
     // Only the commands that can run for a long time need this, and installing it
@@ -329,6 +355,7 @@ fn main() -> ExitCode {
         Command::Probe(a) => run_probe(&cli, a),
         Command::Scan(a) => run_scan(&cli, a),
         Command::Listen(a) => run_listen(&cli, a),
+        Command::H2g(a) => run_h2g(&cli, a),
         Command::Selftest => run_selftest(&cli),
     };
     match res {
@@ -473,8 +500,84 @@ fn run_scan(cli: &Cli, a: &ScanArgs) -> RunResult<()> {
         banner: a.banner,
         stage1_ports: a.stage1_ports,
         spec_notes: Vec::new(),
+        open_only: a.open,
     };
     scan::run(&opts, &mut report).map_err(RuntimeError::usage)?;
+    emit(cli, &report)
+}
+
+/// The AF_UNIX `sun_path` field holds 107 bytes plus the NUL; a longer name
+/// can never reach a muxer, so it is our argument's fault, not an answer
+/// from the target.
+fn uds_name_limit() -> usize {
+    // SAFETY: an all-zero sockaddr_un is a valid value; only the field length is read.
+    let zeroed: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    zeroed.sun_path.len() - 1
+}
+
+/// Every h2g argument check, before anything reads the environment: a
+/// rejected invocation must not run `probe::collect`, must not preflight,
+/// and must not connect. Returns the parsed port spec so `run_h2g` cannot
+/// act before the checks pass.
+fn h2g_validate(a: &H2gArgs) -> RunResult<spec::PortSpec> {
+    if a.parallel == 0 || a.parallel > 256 {
+        return Err(RuntimeError::usage(
+            "--parallel must be 1..=256: the muxer table is 1023 slots shared with the guest"
+                .to_string(),
+        ));
+    }
+    let ports =
+        spec::PortSpec::parse(&a.ports).map_err(|e| RuntimeError::usage(e + " (--ports SPEC)"))?;
+    let raw = std::os::unix::ffi::OsStrExt::as_bytes(a.uds.as_os_str());
+    if raw.len() > uds_name_limit() {
+        return Err(RuntimeError::usage(format!(
+            "--uds {}: the path is {} bytes, over the {}-byte AF_UNIX sun_path limit",
+            a.uds.display(),
+            raw.len(),
+            uds_name_limit()
+        )));
+    }
+    if !a.timeout.is_finite() || a.timeout <= 0.0 {
+        return Err(RuntimeError::usage(format!(
+            "--timeout must be a finite number of seconds above 0 (got {})",
+            a.timeout
+        )));
+    }
+    Ok(ports)
+}
+
+/// A light header, then the sweep: h2g needs no AF_VSOCK at all, so no
+/// classification probes, no config, no diag. Kernel/uid/caps stay - they are
+/// facts about this run - but `probe`'s classification rows and findings are
+/// cleared: h2g's row counts and `--open` note must describe the sweep only.
+/// The header's `posture`/`device` lines describe the kernel running us, not
+/// the target behind the socket; what the target is gets said by the noise
+/// line `h2g::run` writes, and the command name says whose sweep this is.
+fn run_h2g(cli: &Cli, a: &H2gArgs) -> RunResult<()> {
+    let ports = h2g_validate(a)?;
+    let mut report = probe::collect(&probe::ProbeOpts {
+        seqpacket: false,
+        to_host: false,
+        vsockmon: false,
+        config: false,
+        mmio: false,
+        diag: false,
+    });
+    report.command = "h2g".to_string();
+    report.probes.clear();
+    report.findings.clear();
+    h2g::run(
+        &h2g::Opts {
+            ports: &ports.0,
+            uds: &a.uds,
+            timeout_ms: (a.timeout * 1000.0) as i32,
+            parallel: a.parallel,
+            banner: a.banner,
+            open_only: a.open,
+        },
+        &mut report,
+    )
+    .map_err(RuntimeError::msg)?;
     emit(cli, &report)
 }
 
@@ -673,4 +776,73 @@ impl From<RuntimeError> for ExitCode {
 fn runtime(msg: impl Into<String>) -> ExitCode {
     eprintln!("vsockscan: {}", msg.into());
     ExitCode::from(2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn h2g(ports: &str, timeout: f64, parallel: usize, uds: &str) -> H2gArgs {
+        H2gArgs {
+            uds: uds.into(),
+            ports: ports.to_string(),
+            timeout,
+            parallel,
+            banner: 0,
+            open: false,
+        }
+    }
+
+    /// Every rejection here is the operator's argument (usage), never the
+    /// machine's fault (runtime) - and never the target's, because the
+    /// validator cannot reach the target at all.
+    fn assert_usage(res: RunResult<spec::PortSpec>, needle: &str) {
+        let err = res.expect_err("the bad argument must be refused");
+        assert!(err.usage, "not a usage error: {}", err.message);
+        assert!(!err.assert_failure);
+        assert!(err.message.contains(needle), "{}", err.message);
+    }
+
+    #[test]
+    fn h2g_validator_accepts_a_plain_invocation() {
+        let ports = h2g_validate(&h2g("1235,1236", 2.0, 16, "/tmp/firecracker.sock"))
+            .expect("a plain h2g invocation")
+            .0;
+        assert_eq!(ports, vec![1235, 1236]);
+        // The CLI's declared defaults are inside the validator, and so are
+        // the extremes of what it advertises.
+        assert!(h2g_validate(&h2g("top", 2.0, 16, "/t.sock")).is_ok());
+        assert!(h2g_validate(&h2g("top", 0.01, 1, "/t.sock")).is_ok());
+        assert!(h2g_validate(&h2g("top", 0.01, 256, "/t.sock")).is_ok());
+    }
+
+    #[test]
+    fn h2g_validator_bounds_parallel_by_the_muxer_table() {
+        assert_usage(h2g_validate(&h2g("top", 2.0, 0, "/t.sock")), "1023");
+        assert_usage(h2g_validate(&h2g("top", 2.0, 257, "/t.sock")), "1..=256");
+    }
+
+    #[test]
+    fn h2g_validator_rejects_unknown_port_tokens() {
+        assert_usage(h2g_validate(&h2g("bogus", 2.0, 16, "/t.sock")), "--ports");
+        assert_usage(h2g_validate(&h2g("9-3", 2.0, 16, "/t.sock")), "--ports");
+        assert_usage(h2g_validate(&h2g("", 2.0, 16, "/t.sock")), "--ports");
+    }
+
+    #[test]
+    fn h2g_validator_rejects_timeouts_that_cannot_bound_a_handshake() {
+        // 0 or NaN as `timeout_ms` answers every port `silent` without ever
+        // waiting; a negative one makes poll block forever. None of them is
+        // a measurement, so none of them may run.
+        for t in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_usage(h2g_validate(&h2g("top", t, 16, "/t.sock")), "--timeout");
+        }
+    }
+
+    #[test]
+    fn h2g_validator_rejects_a_path_over_the_sun_path_limit() {
+        let long = format!("/tmp/{}", "x".repeat(200));
+        assert_usage(h2g_validate(&h2g("top", 2.0, 16, &long)), "AF_UNIX");
+        assert_usage(h2g_validate(&h2g("top", 2.0, 16, &long)), "107");
+    }
 }

@@ -64,7 +64,7 @@ const SCHEMA: &str = r##"{
   "properties": {
     "tool": {"type": "string"},
     "version": {"type": "string"},
-    "command": {"type": "string", "enum": ["probe", "scan", "listen", "selftest"]},
+    "command": {"type": "string", "enum": ["probe", "scan", "listen", "h2g", "selftest"]},
     "header": {
       "type": "object",
       "required": ["kernel", "uid", "caps", "cid", "sysctls", "posture", "device", "module-verdicts", "diag", "noise"],

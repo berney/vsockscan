@@ -343,9 +343,21 @@ pub struct ProbeRow {
 /// record the count in a note; `--open` must never silently shrink a sweep
 /// (spec 2026-10-07-h2g-open §6).
 pub fn filter_open(probes: &mut Vec<ProbeRow>) -> usize {
-    let before = probes.len();
-    probes.retain(|r| r.outcome.kind == OutcomeKind::Open);
-    before - probes.len()
+    filter_open_by(probes, |r| r.outcome.kind)
+}
+
+/// `--open` over `scan`'s sweep rows: the same dropped-count contract as
+/// [`filter_open`], over the other row shape. One rule with two entry
+/// points, so `scan --open` and `h2g --open` can never disagree about what
+/// `open` keeps.
+pub fn filter_open_rows(rows: &mut Vec<ScanRow>) -> usize {
+    filter_open_by(rows, |r| r.outcome.kind)
+}
+
+fn filter_open_by<T>(rows: &mut Vec<T>, kind: impl Fn(&T) -> OutcomeKind) -> usize {
+    let before = rows.len();
+    rows.retain(|r| kind(r) == OutcomeKind::Open);
+    before - rows.len()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -421,7 +433,7 @@ pub struct Header {
 pub struct Report {
     pub tool: String,
     pub version: String,
-    /// `probe` | `scan` | `listen` | `selftest`
+    /// `probe` | `scan` | `listen` | `h2g` | `selftest`
     pub command: String,
     pub header: Header,
     pub tells: Vec<Tell>,

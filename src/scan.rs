@@ -276,6 +276,9 @@ pub struct Opts<'a> {
     /// Ports probed per CID before the full sweep decides whether that CID is worth it.
     pub stage1_ports: usize,
     pub spec_notes: Vec<String>,
+    /// Keep only rows whose answer was `open`, after the summary has counted
+    /// the whole sweep (`--open`, spec §6).
+    pub open_only: bool,
 }
 
 /// Stage-1 selection: the first `n` ports of the spec, plus the middle and last
@@ -397,7 +400,26 @@ pub fn run(o: &Opts, report: &mut Report) -> Result<(), String> {
     // The model owns the counting so the summary can never disagree with the rows.
     report.recompute_summary(u128::from(elapsed_ms));
     report.summary.notes.extend(notes);
+    if o.open_only {
+        let note = apply_open(report);
+        report.summary.notes.push(note);
+    }
     Ok(())
+}
+
+/// `--open` over a finished sweep: keep only rows that answered `open` and
+/// return the note saying what was filtered. Runs after `recompute_summary`
+/// so the summary keeps the swept count - the filter shrinks the view, never
+/// the evidence. Findings are untouched, and the `probe` classification rows
+/// live in `report.probes`, which this never reads: `--open` filters this
+/// command's sweep and nothing else.
+fn apply_open(report: &mut Report) -> String {
+    let dropped = crate::model::filter_open_rows(&mut report.rows);
+    format!(
+        "--open: showing {} open row(s) of {}",
+        report.rows.len(),
+        report.rows.len() + dropped
+    )
 }
 
 /// `(cid, port, outcome-none, outcome-to-host)` for every pair present.
@@ -882,5 +904,38 @@ mod tests {
         assert!(report.findings[0].message.contains("full backlog"));
         assert!(report.findings[0].message.contains("pid 999"));
         assert!(report.findings[1].message.contains("another namespace"));
+    }
+
+    /// The `--open` step over an assembled sweep: the same code path `run`
+    /// takes, exercised without an AF_VSOCK environment.
+    #[test]
+    fn open_only_keeps_answered_rows_and_notes_the_filter() {
+        let mut report = Report::new("scan", crate::model::placeholder_header());
+        report.rows = vec![
+            row(3, 22, FlagSet::None, OutcomeKind::Open),
+            row(3, 80, FlagSet::None, OutcomeKind::RefusedKernel),
+            row(3, 443, FlagSet::None, OutcomeKind::Closed),
+        ];
+        report.recompute_summary(0);
+        let note = apply_open(&mut report);
+        assert_eq!(note, "--open: showing 1 open row(s) of 3", "{note}");
+        assert_eq!(report.rows.len(), 1, "{:?}", report.rows);
+        assert_eq!(report.rows[0].outcome.kind, OutcomeKind::Open);
+        assert_eq!(
+            report.summary.results, 3,
+            "the summary counts the sweep, not the filtered view"
+        );
+    }
+
+    #[test]
+    fn open_only_notes_zero_open_as_an_answer_not_a_failure() {
+        // "swept 1, nothing open" must be distinguishable from "failed to sweep".
+        let mut report = Report::new("scan", crate::model::placeholder_header());
+        report.rows = vec![row(3, 22, FlagSet::None, OutcomeKind::RefusedKernel)];
+        report.recompute_summary(0);
+        let note = apply_open(&mut report);
+        assert_eq!(note, "--open: showing 0 open row(s) of 1", "{note}");
+        assert!(report.rows.is_empty());
+        assert_eq!(report.summary.results, 1);
     }
 }

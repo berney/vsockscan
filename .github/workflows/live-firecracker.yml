@@ -1,0 +1,58 @@
+name: Live Firecracker
+
+# One microVM boot per run: the h2g taxonomy asserted through a real
+# Firecracker vsock muxer (scripts/live-firecracker.sh). Runners without a
+# usable /dev/kvm record a skip instead of a failure.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build static release binary
+    runs-on: ubuntu-latest
+    steps:
+      # SHA-pinned; Dependabot keeps refs current (see .github/dependabot.yml).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - name: Build release binary
+        run: cargo build --release --target x86_64-unknown-linux-musl
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vsockscan-binary
+          path: target/x86_64-unknown-linux-musl/release/vsockscan
+
+  live:
+    name: Real Firecracker muxer
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: vsockscan-binary
+          path: bin
+      - name: Prepare binary
+        run: chmod +x bin/vsockscan
+      - name: Install fixture tools
+        run: sudo apt-get update && sudo apt-get install -y squashfs-tools e2fsprogs
+      - name: Provision assets
+        run: scripts/live-firecracker.sh setup --system
+      - name: Run muxer battery
+        env:
+          BIN: bin/vsockscan
+        run: scripts/live-firecracker.sh run --skip-unavailable
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: live-firecracker-console
+          path: target/live-firecracker/

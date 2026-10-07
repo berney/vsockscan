@@ -25,12 +25,17 @@ pub struct Opts<'a> {
 /// Filesystem and handshake answers mapped onto the h2g taxonomy. The
 /// stage decides the meaning: before the channel exists an errno is an
 /// answer about the socket file - `stale` is connect-time ECONNREFUSED,
-/// nothing else. After connect, EPIPE/ECONNRESET/ECONNABORTED are the far
-/// end hanging up on the handshake: a refusal, i.e. Closed.
+/// nothing else. `ENOTDIR` joins `ENOENT` in `absent`: a walk that hits a
+/// non-directory component (a file where a jail directory was expected,
+/// or `.../vsock/x.sock` routed through the socket file itself) means no
+/// socket can exist at that path - the same filesystem answer, reached
+/// through a different kernel error. After connect, EPIPE/ECONNRESET/
+/// ECONNABORTED are the far end hanging up on the handshake: a refusal,
+/// i.e. Closed.
 pub fn kind_for_errno(e: i32, stage: Stage) -> OutcomeKind {
     match stage {
         Stage::Connect => match e {
-            libc::ENOENT => OutcomeKind::Absent,
+            libc::ENOENT | libc::ENOTDIR => OutcomeKind::Absent,
             libc::EACCES => OutcomeKind::Denied,
             libc::ECONNREFUSED => OutcomeKind::Stale,
             _ => OutcomeKind::Error,
@@ -415,6 +420,11 @@ mod tests {
             kind_for_errno(libc::ENOENT, Stage::Connect),
             OutcomeKind::Absent
         );
+        // a path walked through a non-directory is the same filesystem answer
+        assert_eq!(
+            kind_for_errno(libc::ENOTDIR, Stage::Connect),
+            OutcomeKind::Absent
+        );
         assert_eq!(
             kind_for_errno(libc::EACCES, Stage::Connect),
             OutcomeKind::Denied
@@ -513,6 +523,12 @@ mod tests {
         let pre = preflight(&path, 400, canary).expect("a reachable muxer preflights");
         let alert = pre.alert.expect("a canary answer is an alert");
         assert!(alert.contains("answered CONNECT"), "{alert}");
+        // the real-world jailer stumble: a path walked through the socket
+        // file answers ENOTDIR, and that is `absent` too
+        let through = path.join("inside.sock");
+        let err = preflight(&through, 400, canary)
+            .expect_err("a socket file cannot have a socket under it");
+        assert!(err.contains("absent"), "{err}");
         let missing = dir.join("gone.sock");
         let err = preflight(&missing, 400, canary).expect_err("absent is not a sweepable target");
         let _ = std::fs::remove_dir_all(&dir);

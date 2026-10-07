@@ -66,7 +66,8 @@ Every rule below exists because a measurement broke a reasonable-looking alterna
   bind and accept rows.
   `refused-kernel` (nothing left the guest, e.g. `ENODEV`), `loopback-redirect` and
   `unsupported` are kernel-path answers only `probe` and `scan` emit; `absent` (no socket
-  file), `denied` (its mode bits), `stale` (socket file whose listener died) and
+  file, or none could be: `ENOENT`, or `ENOTDIR` from a path walked through one), `denied`
+  (its mode bits), `stale` (socket file whose listener died) and
   `not-muxer` (something else answered the handshake line) are filesystem/protocol
   answers only `h2g` emits. A registered transport with no attached guest still answers
   `connect(CID 3)` with `ENODEV`, so an errno is never read as "the peer refused a port".
@@ -104,4 +105,12 @@ muxer (handshake rows, JSON shape, `--open` counts, preflight aborts, escaped
 colour contract (stripping SGR from a coloured render yields byte-identical output for
 `text` and `yaml`, valid JSON for `json`, colour-optional Markdown), the pinned
 `vsock_diag` request bytes, and the module-verdict reason rules.
+
+`scripts/live-firecracker.sh` is not part of `cargo test`: it boots a real
+Firecracker microVM (matched CI kernel + rootfs, cached under the user's
+cache dir, no root) whose init holds an AF_VSOCK listener, then re-runs the
+`h2g` battery through a real muxer - open with a host port from the stock
+2^30 pool, closed, `--open` counts, and both `absent` filesystem answers -
+and exits `skipped` where `/dev/kvm` says it cannot. GitHub runs it on every
+push via `.github/workflows/live-firecracker.yml`.
 

@@ -13,13 +13,43 @@
 
 use std::path::Path;
 
+/// Where an attempt died. The same errno means different things before and
+/// after the channel exists: a refused `connect()` is a filesystem answer
+/// about a socket with no listener, while ECONNRESET after connect is the
+/// far end hanging up on the handshake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Connect,
+    Write,
+    Read,
+}
+
+impl Stage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Stage::Connect => "connect",
+            Stage::Write => "write",
+            Stage::Read => "read",
+        }
+    }
+}
+
 // The handshake client is wired into the sweep by `h2g::run`; see `probe`.
 pub enum Attempt {
-    Open { host_port: u32 },
+    Open {
+        host_port: u32,
+    },
     Closed,
+    /// The handshake got no answer inside the timeout: no line after
+    /// `CONNECT`, or a `connect()` the muxer's backlog never admitted.
     Silent,
-    NotMuxer { first_line: String },
-    ConnectFail { errno: i32 },
+    NotMuxer {
+        first_line: String,
+    },
+    ConnectFail {
+        errno: i32,
+        stage: Stage,
+    },
 }
 
 fn errno() -> i32 {
@@ -53,7 +83,13 @@ pub fn probe(path: &Path, port: u32, timeout_ms: i32, banner: usize) -> (Attempt
     // SAFETY: constant family/type, no pointers.
     let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
     if fd < 0 {
-        return (Attempt::ConnectFail { errno: errno() }, Vec::new());
+        return (
+            Attempt::ConnectFail {
+                errno: errno(),
+                stage: Stage::Connect,
+            },
+            Vec::new(),
+        );
     }
     let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
@@ -61,31 +97,88 @@ pub fn probe(path: &Path, port: u32, timeout_ms: i32, banner: usize) -> (Attempt
         *d = *s as libc::c_char;
     }
     let len = std::mem::offset_of!(libc::sockaddr_un, sun_path) + raw.len();
+    // A wedged muxer with a full accept backlog blocks `connect()` itself,
+    // outside every later timeout and deaf to Ctrl-C under musl's
+    // SA_RESTART `signal()`. The --timeout contract covers connect (spec
+    // §3), so it runs non-blocking and is settled by poll + SO_ERROR.
+    // SAFETY: F_GETFL on a descriptor we own.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: F_SETFL adding O_NONBLOCK to the flags we just read.
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        let e = errno();
+        unsafe { libc::close(fd) };
+        return (
+            Attempt::ConnectFail {
+                errno: e,
+                stage: Stage::Connect,
+            },
+            Vec::new(),
+        );
+    }
     // SAFETY: live sockaddr_un, sun_path prefix initialised, exact length.
-    if unsafe {
+    let cr = unsafe {
         libc::connect(
             fd,
             &addr as *const _ as *const libc::sockaddr,
             len as libc::socklen_t,
         )
-    } != 0
-    {
+    };
+    let e = if cr == 0 {
+        0
+    } else {
         let e = errno();
+        if matches!(e, libc::EINPROGRESS | libc::EWOULDBLOCK | libc::EALREADY) {
+            match wait_writable(fd, timeout_ms) {
+                Ok(so_error) => so_error,
+                // A backlog the muxer never drains is as wedged as a muxer
+                // that never answers a handshake.
+                Err(()) => {
+                    unsafe { libc::close(fd) };
+                    return (Attempt::Silent, Vec::new());
+                }
+            }
+        } else {
+            e
+        }
+    };
+    if e != 0 {
         unsafe { libc::close(fd) };
-        return (Attempt::ConnectFail { errno: e }, Vec::new());
+        return (
+            Attempt::ConnectFail {
+                errno: e,
+                stage: Stage::Connect,
+            },
+            Vec::new(),
+        );
     }
+    // SAFETY: connect completed; restore blocking mode, which read_line and
+    // drain poll around anyway. A failure here leaves the fd non-blocking,
+    // harmless for poll-driven reads.
+    unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
     let req = format!("CONNECT {port}\n");
     // SAFETY: writing a buffer we own to a connected descriptor.
     let wr = unsafe { libc::write(fd, req.as_ptr().cast(), req.len()) };
     if wr < 0 {
         let e = errno();
         unsafe { libc::close(fd) };
-        return (Attempt::ConnectFail { errno: e }, Vec::new());
+        return (
+            Attempt::ConnectFail {
+                errno: e,
+                stage: Stage::Write,
+            },
+            Vec::new(),
+        );
     }
     let (line, closed_mid, err) = read_line(fd, timeout_ms);
     if let Some(e) = err {
         unsafe { libc::close(fd) };
-        return (Attempt::ConnectFail { errno: e }, Vec::new());
+        return (
+            Attempt::ConnectFail {
+                errno: e,
+                stage: Stage::Read,
+            },
+            Vec::new(),
+        );
     }
     let outcome = match line {
         None => {
@@ -111,6 +204,52 @@ pub fn probe(path: &Path, port: u32, timeout_ms: i32, banner: usize) -> (Attempt
     (outcome, bytes)
 }
 
+/// Settle a pending connect under `timeout_ms`. `Ok(n)` is `SO_ERROR`
+/// (0 means connected); `Err(())` is the deadline. The poll slice matches
+/// `read_line`'s, so one deadline style governs the whole handshake.
+fn wait_writable(fd: libc::c_int, timeout_ms: i32) -> Result<i32, ()> {
+    let mut waited = 0i32;
+    loop {
+        let mut p = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: poll on a descriptor we own.
+        let pr = unsafe { libc::poll(&mut p, 1, 50) };
+        waited += 50;
+        if pr < 0 {
+            let e = errno();
+            if e != libc::EINTR || waited >= timeout_ms {
+                return Err(());
+            }
+            continue;
+        }
+        if pr == 0 {
+            if waited >= timeout_ms {
+                return Err(());
+            }
+            continue;
+        }
+        let mut so_error: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: getsockopt writes exactly `len` bytes we provide.
+        if unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                &mut so_error as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        } < 0
+        {
+            return Err(());
+        }
+        return Ok(so_error);
+    }
+}
+
 /// Read one `\n`-terminated line under `timeout_ms`. Returns
 /// `(line, saw_eof_midline, errno)`: `None,false,false` is the timeout.
 fn read_line(fd: libc::c_int, timeout_ms: i32) -> (Option<String>, bool, Option<i32>) {
@@ -126,6 +265,16 @@ fn read_line(fd: libc::c_int, timeout_ms: i32) -> (Option<String>, bool, Option<
         let pr = unsafe { libc::poll(&mut p, 1, 50) };
         waited += 50;
         if pr < 0 {
+            // A Ctrl-C lands here as EINTR: the flag is already stored and
+            // the sweep stops at its next check, so resume the bounded wait
+            // (`waited` keeps time) instead of shipping a fatal-looking
+            // errno to the operator.
+            if errno() == libc::EINTR {
+                if waited >= timeout_ms {
+                    return (None, false, None);
+                }
+                continue;
+            }
             return (None, false, Some(errno()));
         }
         if pr == 0 {
@@ -144,6 +293,9 @@ fn read_line(fd: libc::c_int, timeout_ms: i32) -> (Option<String>, bool, Option<
             return (Some(String::from_utf8_lossy(&buf).into_owned()), true, None);
         }
         if n < 0 {
+            if errno() == libc::EINTR {
+                continue;
+            }
             return (None, false, Some(errno()));
         }
         if b[0] == b'\n' {
@@ -197,6 +349,7 @@ mod tests {
     use std::io::Read;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::io::AsRawFd;
     use std::path::{Path, PathBuf};
 
     /// One test's scratch dir plus socket path, unique per test so parallel
@@ -364,7 +517,8 @@ mod tests {
             matches!(
                 attempt,
                 Attempt::ConnectFail {
-                    errno: libc::ENOENT
+                    errno: libc::ENOENT,
+                    stage: Stage::Connect
                 }
             ),
             "a missing path is ENOENT"
@@ -376,7 +530,7 @@ mod tests {
         let plain = dir.join("plain");
         std::fs::write(&plain, b"not a socket").expect("regular file");
         let (attempt, _) = probe(&plain, 1, 400, 0);
-        let Attempt::ConnectFail { errno } = attempt else {
+        let Attempt::ConnectFail { errno, .. } = attempt else {
             panic!("a regular file must not look like a muxer");
         };
         assert_ne!(
@@ -396,7 +550,8 @@ mod tests {
                 matches!(
                     attempt,
                     Attempt::ConnectFail {
-                        errno: libc::EACCES
+                        errno: libc::EACCES,
+                        stage: Stage::Connect
                     }
                 ),
                 "a permission bit is its own answer"
@@ -416,7 +571,8 @@ mod tests {
             matches!(
                 attempt,
                 Attempt::ConnectFail {
-                    errno: libc::ECONNREFUSED
+                    errno: libc::ECONNREFUSED,
+                    stage: Stage::Connect
                 }
             ),
             "a dead socket refuses, it is not silent"
@@ -425,6 +581,81 @@ mod tests {
         // A socket file that outlives the test points the next run at a dead
         // path; every test unlinks.
         std::fs::remove_file(&path).expect("unlink stale socket");
+        cleanup(&dir);
+    }
+
+    /// The wedged-muxer shape: a daemon that stops accepting. A blocking
+    /// `connect()` sits behind the backlog past `--timeout` and (under
+    /// musl's SA_RESTART `signal()`) past Ctrl-C. The non-blocking path
+    /// must answer inside its budget instead.
+    #[test]
+    fn connect_cannot_outrun_the_timeout() {
+        let (dir, path) = sock("wedged");
+        let l = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        // SAFETY: shrink the accept backlog of a listener we own.
+        unsafe { libc::listen(l.as_raw_fd(), 0) };
+        // Park the one queued slot the kernel still accepts. If even this
+        // connect is refused outright, probe will be too, and
+        // `stale_socket_refuses` already pins the refused path.
+        let filler = std::os::unix::net::UnixStream::connect(&path).ok();
+        let start = std::time::Instant::now();
+        let (attempt, _) = probe(&path, 7, 300, 0);
+        let ms = start.elapsed().as_millis();
+        assert!(
+            ms < 2000,
+            "connect held the probe {ms}ms past its 300ms budget"
+        );
+        assert!(
+            matches!(attempt, Attempt::Silent | Attempt::ConnectFail { .. }),
+            "a wedged accept loop must answer silent or failed, not hang"
+        );
+        drop(filler);
+        drop(l);
+        cleanup(&dir);
+    }
+
+    /// A peer that RSTs after connect is the far end refusing, which the
+    /// caller may only read as mid-handshake once the stage is carried.
+    #[test]
+    fn reset_after_connect_is_a_mid_flight_stage() {
+        let (dir, path) = sock("reset");
+        let l = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        let peer = std::thread::spawn(move || {
+            let (s, _) = l.accept().expect("accept");
+            let ling = libc::linger {
+                l_onoff: 1,
+                l_linger: 0,
+            };
+            // SAFETY: SO_LINGER(on, 0) makes close send RST, on a socket we own.
+            unsafe {
+                libc::setsockopt(
+                    s.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_LINGER,
+                    &ling as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::linger>() as libc::socklen_t,
+                )
+            };
+            drop(s);
+        });
+        let (attempt, _) = probe(&path, 9, 500, 0);
+        peer.join().expect("peer");
+        match attempt {
+            Attempt::ConnectFail {
+                stage: Stage::Write | Stage::Read,
+                errno,
+            } => {
+                assert_ne!(errno, 0, "a mid-flight failure carries its errno");
+            }
+            Attempt::Closed => {}
+            other => panic!(
+                "expected a mid-flight refusal, got errno {:?}",
+                match &other {
+                    Attempt::ConnectFail { errno, stage } => Some((*errno, stage.as_str())),
+                    _ => None,
+                }
+            ),
+        }
         cleanup(&dir);
     }
 }

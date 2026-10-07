@@ -174,8 +174,8 @@ scripts/live-firecracker.sh run [--skip-unavailable]  # one boot, four checks; c
 
 ## Housekeeping
 
-- `.lab7/` (scratch), `target/` and the agent session ledger are ignored; never
-  commit them.
+- `target/`, the guest-console artifact dir and the agent session ledger are ignored;
+  never commit them.
 - Prose in `src/` comments states *why* an invariant exists and what broke when it
   did not; a comment that re-describes the next line is noise. Message strings obey
   the space-run rule above.

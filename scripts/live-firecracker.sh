@@ -143,9 +143,11 @@ cmd_run() {
   [[ -x "$BIN" ]] || die "BIN=$BIN is not executable"
 
   WORK="$(mktemp -d "${TMPDIR:-/tmp}/vsockscan-fc.XXXXXX")"
-  local fc_pid=""
+  # Global on purpose: the EXIT trap fires after cmd_run returns, when a
+  # local would already be out of scope and set -u would abort cleanup.
+  fc_pid=""
   cleanup() {
-    if [[ -n "$fc_pid" ]]; then
+    if [[ -n "${fc_pid:-}" ]]; then
       kill "$fc_pid" 2>/dev/null || true
       sleep 0.5
       kill -9 "$fc_pid" 2>/dev/null || true

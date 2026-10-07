@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::model::{
     filter_open, open_note, FlagSet, Outcome, OutcomeKind, ProbeRow, Report, Severity,
 };
-use crate::muxer::{self, Attempt};
+use crate::muxer::{self, Attempt, Stage};
 
 pub struct Opts<'a> {
     pub ports: &'a [u32],
@@ -22,19 +22,23 @@ pub struct Opts<'a> {
     pub open_only: bool,
 }
 
-/// Filesystem and handshake answers mapped onto the h2g taxonomy. The two
-/// mid-flight errnos are answers from the other end, not local errors:
-/// `socket()` and `connect()` never emit EPIPE, so a write-side EPIPE is the
-/// guest hanging up on the handshake - a refusal, i.e. Closed - and an
-/// AF_UNIX `connect()` reports a vanished peer as ECONNRESET, exactly what
-/// ECONNREFUSED says about a socket file whose listener died.
-pub fn kind_for_errno(e: i32) -> OutcomeKind {
-    match e {
-        libc::ENOENT => OutcomeKind::Absent,
-        libc::EACCES => OutcomeKind::Denied,
-        libc::ECONNREFUSED | libc::ECONNRESET => OutcomeKind::Stale,
-        libc::EPIPE => OutcomeKind::Closed,
-        _ => OutcomeKind::Error,
+/// Filesystem and handshake answers mapped onto the h2g taxonomy. The
+/// stage decides the meaning: before the channel exists an errno is an
+/// answer about the socket file - `stale` is connect-time ECONNREFUSED,
+/// nothing else. After connect, EPIPE/ECONNRESET/ECONNABORTED are the far
+/// end hanging up on the handshake: a refusal, i.e. Closed.
+pub fn kind_for_errno(e: i32, stage: Stage) -> OutcomeKind {
+    match stage {
+        Stage::Connect => match e {
+            libc::ENOENT => OutcomeKind::Absent,
+            libc::EACCES => OutcomeKind::Denied,
+            libc::ECONNREFUSED => OutcomeKind::Stale,
+            _ => OutcomeKind::Error,
+        },
+        Stage::Write | Stage::Read => match e {
+            libc::EPIPE | libc::ECONNRESET | libc::ECONNABORTED => OutcomeKind::Closed,
+            _ => OutcomeKind::Error,
+        },
     }
 }
 
@@ -69,11 +73,20 @@ pub fn preflight(path: &Path, timeout_ms: i32, port: u32) -> Result<Preflight, S
                  a forwarder or proxy agent is listening on more than its services",
             )),
         }),
-        other => Err(format!(
-            "preflight: {}: {}",
-            path.display(),
-            describe(&other)
-        )),
+        other => {
+            // A peer that resets mid-handshake answers like a guest with no
+            // listener on any port; it is sweepable, not a dead path.
+            if let Attempt::ConnectFail { errno, stage } = &other {
+                if kind_for_errno(*errno, *stage) == OutcomeKind::Closed {
+                    return Ok(Preflight { alert: None });
+                }
+            }
+            Err(format!(
+                "preflight: {}: {}",
+                path.display(),
+                describe(&other)
+            ))
+        }
     }
 }
 
@@ -81,20 +94,26 @@ pub fn preflight(path: &Path, timeout_ms: i32, port: u32) -> Result<Preflight, S
 /// so the report reads "absent", never a bare errno.
 fn describe(a: &Attempt) -> String {
     match a {
-        Attempt::ConnectFail { errno } => {
-            let kind = kind_for_errno(*errno);
+        Attempt::ConnectFail { errno, stage } => {
+            let kind = kind_for_errno(*errno, *stage);
             format!(
                 "{} ({}): {}",
                 kind.as_str(),
                 crate::uapi::errno_label(*errno),
                 match kind {
                     OutcomeKind::Absent =>
-                        "no VM with this uds_path; a jailer resolves uds_path inside the jail root",
+                        "no VM with this uds_path; a jailer resolves uds_path inside the jail root"
+                            .to_string(),
                     OutcomeKind::Denied =>
-                        "the socket file denies this uid; jail roots are usually root-owned",
+                        "the socket file denies this uid; jail roots are usually root-owned"
+                            .to_string(),
                     OutcomeKind::Stale =>
-                        "a socket file with no listener: a VM that died without cleanup",
-                    _ => "the path exists but refused us",
+                        "a socket file with no listener: a VM that died without cleanup".to_string(),
+                    _ if *stage == Stage::Connect => "the path exists but refused us".to_string(),
+                    _ => format!(
+                        "the channel broke during the {} of the handshake",
+                        stage.as_str()
+                    ),
                 }
             )
         }
@@ -108,6 +127,30 @@ fn describe(a: &Attempt) -> String {
         Attempt::Open { host_port } => format!("open unexpectedly (muxer host port {host_port})"),
         Attempt::Closed => "closed".into(),
     }
+}
+
+/// Escape control bytes and cap length before a far-end line becomes
+/// report text. The same channel's banner bytes already go through
+/// `listen::hexdump`; a stranger behind the socket must not be able to
+/// clear the operator's screen or set its window title.
+fn scrub_line(s: &str) -> String {
+    let mut out = String::new();
+    let mut truncated = false;
+    for (n, c) in s.chars().enumerate() {
+        if n >= 120 {
+            truncated = true;
+            break;
+        }
+        if c.is_control() {
+            out.push_str(&format!("\\x{:02x}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    if truncated {
+        out.push_str(" [...truncated]");
+    }
+    out
 }
 
 /// One completed job: the port, the handshake answer, and any banner bytes
@@ -187,7 +230,10 @@ pub fn run(o: &Opts, report: &mut Report) -> Result<(), String> {
     report.header.noise = format!(
         "planned {} connects through {}; up to {} in parallel, each open channel takes \
          one slot of the muxer's 1023-entry table (shared with the guest's own \
-         connections); the handshake is the only traffic unless --banner is set",
+         connections); before the sweep the local kernel is classified over AF_VSOCK - \
+         /dev/vsock, the loopback canary, and connects to port 1234 of CID 1 and CID 2 \
+         (their evidence stands under tells); the swept channels carry handshake bytes \
+         only unless --banner is set",
         o.ports.len(),
         o.uds.display(),
         o.parallel
@@ -208,13 +254,15 @@ pub fn run(o: &Opts, report: &mut Report) -> Result<(), String> {
             }
             Attempt::Closed => (Outcome::new(OutcomeKind::Closed), None),
             Attempt::Silent => (Outcome::new(OutcomeKind::Silent), None),
-            Attempt::NotMuxer { first_line } => {
-                (Outcome::new(OutcomeKind::NotMuxer), Some(first_line))
-            }
+            Attempt::NotMuxer { first_line } => (
+                Outcome::new(OutcomeKind::NotMuxer),
+                Some(scrub_line(&first_line)),
+            ),
             // errno rides the outcome so text/json show the answer, like scan.
-            Attempt::ConnectFail { errno } => {
-                (Outcome::new(kind_for_errno(errno)).with_errno(errno), None)
-            }
+            Attempt::ConnectFail { errno, stage } => (
+                Outcome::new(kind_for_errno(errno, stage)).with_errno(errno),
+                None,
+            ),
         };
         if !bytes.is_empty() {
             // The same note shape `listen` uses for its per-connection preview.
@@ -363,14 +411,51 @@ mod tests {
 
     #[test]
     fn kind_map() {
-        assert_eq!(kind_for_errno(libc::ENOENT), OutcomeKind::Absent);
-        assert_eq!(kind_for_errno(libc::EACCES), OutcomeKind::Denied);
-        assert_eq!(kind_for_errno(libc::ECONNREFUSED), OutcomeKind::Stale);
-        // mid-handshake guest refusal; socket()/connect() never emit EPIPE
-        assert_eq!(kind_for_errno(libc::EPIPE), OutcomeKind::Closed);
-        // AF_UNIX connect-time peer-gone, same semantics as ECONNREFUSED
-        assert_eq!(kind_for_errno(libc::ECONNRESET), OutcomeKind::Stale);
-        assert_eq!(kind_for_errno(libc::ENOTSOCK), OutcomeKind::Error);
+        assert_eq!(
+            kind_for_errno(libc::ENOENT, Stage::Connect),
+            OutcomeKind::Absent
+        );
+        assert_eq!(
+            kind_for_errno(libc::EACCES, Stage::Connect),
+            OutcomeKind::Denied
+        );
+        assert_eq!(
+            kind_for_errno(libc::ECONNREFUSED, Stage::Connect),
+            OutcomeKind::Stale
+        );
+        assert_eq!(
+            kind_for_errno(libc::ENOTSOCK, Stage::Connect),
+            OutcomeKind::Error
+        );
+        // mid-handshake errnos are the far end refusing, never the filesystem
+        assert_eq!(
+            kind_for_errno(libc::EPIPE, Stage::Write),
+            OutcomeKind::Closed
+        );
+        assert_eq!(
+            kind_for_errno(libc::ECONNRESET, Stage::Read),
+            OutcomeKind::Closed
+        );
+        assert_eq!(
+            kind_for_errno(libc::ECONNABORTED, Stage::Read),
+            OutcomeKind::Closed
+        );
+        // connect-time ECONNRESET is not a thing the taxonomy names here
+        assert_eq!(
+            kind_for_errno(libc::ECONNRESET, Stage::Connect),
+            OutcomeKind::Error
+        );
+    }
+    #[test]
+    fn scrub_line_escapes_control_bytes_and_caps_length() {
+        assert_eq!(scrub_line("HELLO 1"), "HELLO 1");
+        assert_eq!(scrub_line("\x1b[2J\x07pwned"), "\\x1b[2J\\x07pwned");
+        let long = scrub_line(&"u".repeat(400));
+        assert!(long.ends_with(" [...truncated]"));
+        assert_eq!(
+            long.chars().count(),
+            120 + " [...truncated]".chars().count()
+        );
     }
 
     #[test]

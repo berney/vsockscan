@@ -276,3 +276,66 @@ fn h2g_denies_a_daemon_that_is_not_a_muxer() {
     );
     assert!(run.stdout.is_empty(), "a failed run prints no report");
 }
+
+#[test]
+fn the_report_discloses_local_traffic_and_drops_host_verdicts() {
+    let (dir, path) = sock("honest");
+    fake_muxer(path.clone(), vec![1235]);
+    wait_for_bind(&path);
+    let run = h2g(&[
+        "h2g",
+        "--uds",
+        &path.display().to_string(),
+        "--ports",
+        "1235",
+        "--format",
+        "json",
+        "--no-color",
+    ]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let doc = json(&run.stdout);
+    let noise = doc["header"]["noise"].as_str().unwrap_or_default();
+    assert!(
+        noise.contains("CID 1") && noise.contains("loopback canary"),
+        "the noise line denies the AF_VSOCK traffic collect issues: {noise}"
+    );
+    let notes = doc["summary"]["notes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for n in &notes {
+        let s = n.as_str().unwrap_or_default();
+        assert!(
+            !s.starts_with("posture "),
+            "a verdict built from deleted header rows survived: {s}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_not_muxer_line_reaches_the_terminal_escaped() {
+    let (dir, path) = sock("scrub");
+    // Answers the swept port with a screen-clear; the canary hangs up, so
+    // the sweep runs and this line becomes a row value.
+    serve(path.clone(), |p| {
+        (p == 1235).then_some(b"\x1b[2J\x07pwned\n")
+    });
+    wait_for_bind(&path);
+    let run = h2g(&[
+        "h2g",
+        "--uds",
+        &path.display().to_string(),
+        "--ports",
+        "1235",
+        "--no-color",
+    ]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(
+        !run.stdout.contains('\u{1b}'),
+        "a raw escape byte reached the terminal: {:?}",
+        run.stdout
+    );
+    assert!(run.stdout.contains("\\x1b[2J\\x07pwned"), "{}", run.stdout);
+    let _ = std::fs::remove_dir_all(&dir);
+}

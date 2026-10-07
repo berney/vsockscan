@@ -566,6 +566,10 @@ fn run_h2g(cli: &Cli, a: &H2gArgs) -> RunResult<()> {
     report.command = "h2g".to_string();
     report.probes.clear();
     report.findings.clear();
+    // The posture/device note is a verdict about *this* kernel built from
+    // the header rows we just deleted; next to a guest sweep it would read
+    // as a claim about the target. Clear alongside them.
+    report.summary.notes.clear();
     h2g::run(
         &h2g::Opts {
             ports: &ports.0,

@@ -11,6 +11,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   musl:
     runs-on: ubuntu-latest
@@ -21,6 +24,8 @@ jobs:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
           - riscv64gc-unknown-linux-musl
+    env:
+      TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install musl tools
@@ -30,18 +35,18 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
       - name: Build release for musl target
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target "$TARGET"
       - name: Verify static link
         run: |
-          out=$(file target/${{ matrix.target }}/release/vsockscan)
+          out=$(file "target/$TARGET/release/vsockscan")
           echo "$out"
           echo "$out" | grep -qE 'static(-pie)? linked|statically linked' \
             || { echo "ERROR: binary is not statically linked" >&2; exit 1; }
       - name: Package artifact
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
-          tar -C target/${{ matrix.target }}/release \
-              -czf "vsockscan-${version}-${{ matrix.target }}.tar.gz" vsockscan
+          tar -C "target/$TARGET/release" \
+              -czf "vsockscan-${version}-${TARGET}.tar.gz" vsockscan
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: vsockscan-${{ matrix.target }}

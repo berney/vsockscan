@@ -1,0 +1,32 @@
+# Pinned by SHA; refresh with `pre-commit autoupdate --freeze` and read each new version first.
+# tests/fixtures/ holds verbatim kernel captures: whitespace fixers must not touch them.
+exclude: ^tests/fixtures/
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-symlinks
+      - id: check-added-large-files
+      - id: check-executables-have-shebangs
+      - id: detect-private-key
+  - repo: https://github.com/rvben/rumdl-pre-commit
+    rev: b0cff962ee693b9e612c097d22e71e0cba127447  # frozen: v0.3.2
+    hooks:
+      - id: rumdl
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: a6564f5d57444e123433a5c9af733e3975c77229  # frozen: v0.11.0.1-1
+    hooks:
+      - id: shellcheck
+        args: [-S, warning]
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 2ca41cc1372d1e939a6a879f18cdc19fc1cac1ce  # frozen: v8.30.0
+    hooks:
+      - id: gitleaks

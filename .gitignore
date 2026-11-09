@@ -1,2 +1,9 @@
 /target
 /.lab7/
+/.worktrees/
+
+# host-local paths — never commit
+LOCAL.md
+
+# throwaway work
+scratch/

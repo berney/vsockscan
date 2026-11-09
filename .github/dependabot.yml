@@ -10,3 +10,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+
+  # Bumps the SHA-pinned hook revs in .pre-commit-config.yaml and their `# frozen:` comments.
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule:
+      interval: weekly

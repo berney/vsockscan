@@ -1,0 +1,12 @@
+[MD013]
+line-length = 80
+paragraphs = false
+reflow = true
+reflow-mode = "sentence-per-line"
+require-sentence-capital = false
+tables = false
+code-blocks = false
+
+[MD060]
+enabled = true
+style = "aligned-no-space"

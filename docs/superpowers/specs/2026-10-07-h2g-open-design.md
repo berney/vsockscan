@@ -4,32 +4,27 @@ Status: approved in outline 2026-10-07; this document is the contract.
 
 ## 1 Problem
 
-Everything the tool does today stands inside a VM and speaks AF_VSOCK through
-the kernel. Firecracker exposes the opposite direction to the machine running
-it: the virtio-vsock device is a userspace muxer that listens on a host
-AF_UNIX socket (`uds_path`) and speaks a text handshake
-(`docs/vsock.md`, upstream `vsock/unix/muxer.rs::read_connect_cmd`):
+Everything the tool does today stands inside a VM and speaks AF_VSOCK through the kernel.
+Firecracker exposes the opposite direction to the machine running it: the virtio-vsock device is a userspace muxer that listens on a host AF_UNIX socket (`uds_path`) and speaks a text handshake (`docs/vsock.md`, upstream `vsock/unix/muxer.rs::read_connect_cmd`):
 
-```
+```text
 host: connect(uds_path), send "CONNECT <port>\n"
 muxer: if a guest listener accepts -> "OK <host_port>\n", channel open
        if nobody listens          -> connection torn down (EOF, no line)
 ```
 
-`<host_port>` is allocated from `(1 << 30) - 1` upward, so stock muxers answer
-`OK 1073741824+` — a built-in fingerprint. `MAX_CONNECTIONS = 1023` is shared
-with guest-initiated channels; a host sweep that holds channels starves the
-VM's guest-to-host direction.
+`<host_port>` is allocated from `(1 << 30) - 1` upward, so stock muxers answer `OK 1073741824+` — a built-in fingerprint.
+`MAX_CONNECTIONS = 1023` is shared with guest-initiated channels; a host sweep that holds channels starves the VM's guest-to-host direction.
 
-Operators need: which guest ports accept host-originated connections, and a
-verdict on the socket itself (real muxer? alive? stale file? someone else's
-daemon?).
+Operators need: which guest ports accept host-originated connections, and a verdict on the socket itself (real muxer?
+alive?
+stale file?
+someone else's daemon?).
 
 ## 2 Shape: new subcommand, not `scan --h2g`
 
-The test this repo applies to flags: *a flag changes which socket; a
-subcommand changes what a row means.* `--h2g` changes the meaning of every
-row:
+The test this repo applies to flags: *a flag changes which socket; a subcommand changes what a row means.*
+`--h2g` changes the meaning of every row:
 
 - transport: AF_UNIX + text handshake, not `connect(2)` errnos on a vsock
   transport; works with AF_VSOCK compiled out of the host kernel;
@@ -44,19 +39,19 @@ row:
 
 ## 3 CLI surface
 
-```
+```text
 vsockscan h2g --uds PATH [--ports SPEC] [--timeout SEC] [--parallel N]
                     [--banner N] [--open]
 ```
 
-| option | default | contract |
-|---|---|---|
-| `--uds PATH` | required | the device's `uds_path` **exactly** (no `_port` suffix logic — suffixes belong to the g2h direction). AF_UNIX's 107-byte name limit is checked up front |
-| `--ports SPEC` | `top` | same u32 `spec.rs` parser as `scan`; the handshake word is decimal u32 |
-| `--timeout SEC` | 2.0 | applied separately to UDS `connect()` and to handshake reads |
-| `--parallel N` | 16, hard cap 256 | each open channel takes one slot of the muxer's `MAX_CONNECTIONS = 1023` table, shared with guest-initiated traffic; `N > 256` is a clap usage error (not silently clamped) so the sweep stays at least 4x below the table, and the noise line says so |
-| `--banner N` | 0 | after `OK`, read up to N bytes the guest speaks first, bounded wait, hexdump into notes (same convention as `listen`) |
-| `--open` | off | §6 |
+| option          | default          | contract                                                                                                                                                                                                                                               |
+|-----------------|------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--uds PATH`    | required         | the device's `uds_path` **exactly** (no `_port` suffix logic — suffixes belong to the g2h direction). AF_UNIX's 107-byte name limit is checked up front                                                                                                |
+| `--ports SPEC`  | `top`            | same u32 `spec.rs` parser as `scan`; the handshake word is decimal u32                                                                                                                                                                                 |
+| `--timeout SEC` | 2.0              | applied separately to UDS `connect()` and to handshake reads                                                                                                                                                                                           |
+| `--parallel N`  | 16, hard cap 256 | each open channel takes one slot of the muxer's `MAX_CONNECTIONS = 1023` table, shared with guest-initiated traffic; `N > 256` is a clap usage error (not silently clamped) so the sweep stays at least 4x below the table, and the noise line says so |
+| `--banner N`    | 0                | after `OK`, read up to N bytes the guest speaks first, bounded wait, hexdump into notes (same convention as `listen`)                                                                                                                                  |
+| `--open`        | off              | §6                                                                                                                                                                                                                                                     |
 
 Globals (`--format`, `-o`, `--quiet`, `--no-color`, SIGINT partial report,
 exit codes 0/1/2/130) behave as in the other commands.
@@ -89,32 +84,29 @@ muxer".
 - `ENOENT` / `EACCES` / `ECONNREFUSED` at connect -> `absent` / `denied` /
 `stale`.
 
-Every channel is closed immediately after its inspection (`--banner` bytes or
-the handshake line). The table is shared; a scanner must not hold it.
+Every channel is closed immediately after its inspection (`--banner` bytes or the handshake line).
+The table is shared; a scanner must not hold it.
 
-Malformed handshake text is never sent: a wrong word or a non-u32 port makes
-the muxer treat the line as an invalid port request against the guest's
-connection bookkeeping. Probing that parser is out of scope (§8).
+Malformed handshake text is never sent: a wrong word or a non-u32 port makes the muxer treat the line as an invalid port request against the guest's connection bookkeeping.
+Probing that parser is out of scope (§8).
 
 ## 5 Outcome taxonomy (h2g)
 
 Four new `OutcomeKind` variants join the enum; `Open`, `Closed`, `Silent`,
 `Error` keep their current meanings.
 
-| outcome | trigger | meaning and action |
-|---|---|---|
-| `open` | `OK n` | the guest listens; host-reachable now |
-| `closed` | EOF after CONNECT | muxer alive and honest; nobody listens in the guest |
-| `silent` | no line before timeout | accepted but silent: wedged muxer or a daemon that does not speak the handshake |
-| `not-muxer` | full line is neither `OK <u32>` nor EOF | another daemon owns the path; fingerprint it before trusting any row |
-| `absent` | connect `ENOENT` | no VM with that `uds_path`; if a jailer is in play the VMM resolves the path **inside the jail root** — that is the first place to look |
-| `denied` | connect `EACCES` | permissions on the socket file (jail roots are usually root-owned); a fact about the host filesystem, invisible to the guest |
-| `stale` | connect `ECONNREFUSED` | socket file without a listener: a VM that died without cleanup |
+| outcome     | trigger                                 | meaning and action                                                                                                                      |
+|-------------|-----------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| `open`      | `OK n`                                  | the guest listens; host-reachable now                                                                                                   |
+| `closed`    | EOF after CONNECT                       | muxer alive and honest; nobody listens in the guest                                                                                     |
+| `silent`    | no line before timeout                  | accepted but silent: wedged muxer or a daemon that does not speak the handshake                                                         |
+| `not-muxer` | full line is neither `OK <u32>` nor EOF | another daemon owns the path; fingerprint it before trusting any row                                                                    |
+| `absent`    | connect `ENOENT`                        | no VM with that `uds_path`; if a jailer is in play the VMM resolves the path **inside the jail root** — that is the first place to look |
+| `denied`    | connect `EACCES`                        | permissions on the socket file (jail roots are usually root-owned); a fact about the host filesystem, invisible to the guest            |
+| `stale`     | connect `ECONNREFUSED`                  | socket file without a listener: a VM that died without cleanup                                                                          |
 
-Invariant: `scan` never produces `absent`/`denied`/`stale`/`not-muxer`, and
-`h2g` never produces `refused-kernel`/`loopback-redirect`/`unsupported`.
-The taxonomy table in the README lists each kind with the command that can
-emit it.
+Invariant: `scan` never produces `absent`/`denied`/`stale`/`not-muxer`, and `h2g` never produces `refused-kernel`/`loopback-redirect`/`unsupported`.
+The taxonomy table in the README lists each kind with the command that can emit it.
 
 ## 6 `--open` (scan and h2g)
 

@@ -18,7 +18,7 @@ repos:
       - id: check-executables-have-shebangs
       - id: detect-private-key
   - repo: https://github.com/rvben/rumdl-pre-commit
-    rev: b0cff962ee693b9e612c097d22e71e0cba127447  # frozen: v0.3.2
+    rev: 539ea2e1c5a0eb8adeb5fe0b1e2eb66fa5827042  # frozen: v0.3.5
     hooks:
       - id: rumdl
   - repo: https://github.com/shellcheck-py/shellcheck-py
